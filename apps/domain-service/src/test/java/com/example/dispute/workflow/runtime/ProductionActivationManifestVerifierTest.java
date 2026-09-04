@@ -1,0 +1,1674 @@
+package com.example.dispute.workflow.runtime;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.runtime.ActivationDecision.Reason;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.BuildBindings;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.DatabaseIdentities;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.DatabaseIdentity;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.ExplicitCaseIds;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.GraphBinding;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.ImageDigests;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.IsolatedSyntheticNewCases;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.MeasuredAuthorityFacts;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.RoomType;
+import com.example.dispute.workflow.runtime.ProductionActivationExpectedRuntime.SyntheticFixtureDeployment;
+import com.example.dispute.workflow.runtime.ProductionActivationLifecycleStore.ActivationIdentity;
+import com.example.dispute.workflow.runtime.ProductionActivationLifecycleStore.DrainCompletionProof;
+import com.example.dispute.workflow.runtime.ProductionActivationLifecycleStore.LifecycleState;
+import com.example.dispute.workflow.runtime.ProductionActivationLifecycleStore.LifecycleObservation;
+import com.example.dispute.workflow.runtime.ProductionActivationLifecycleStore.TransitionResult;
+import com.example.dispute.workflow.runtime.ProductionActivationReplayStore.Registration;
+import com.example.dispute.workflow.runtime.ProductionActivationReplayStore.RegistrationResult;
+import com.example.dispute.workflow.runtime.ProductionRuntimeMeasurementProvider.DatabasePrivilegeEvidence;
+import com.example.dispute.workflow.runtime.ProductionRuntimeMeasurementProvider.FixedMeasurementProvider;
+import com.example.dispute.workflow.runtime.ProductionRuntimeMeasurementProvider.MeasurementEvidence;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Signature;
+import java.security.spec.ECGenParameterSpec;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.env.MockEnvironment;
+
+class ProductionActivationManifestVerifierTest {
+
+  private static final ObjectMapper MAPPER = JsonMapper.builder().build();
+  private static final Base64.Encoder BASE64_URL = Base64.getUrlEncoder().withoutPadding();
+  private static final Instant NOW = Instant.parse("2026-07-27T08:00:00Z");
+  private static final String KEY_ID = "production-runtime-activation-2026-07";
+  private static final String ACTIVATION_ID = "p9act.v1." + "1".repeat(32);
+  private static final String CANDIDATE_SHA = "a".repeat(40);
+  private static final String NONCE = "activation-nonce-" + "0".repeat(20);
+  private static final String FIXTURE_PATH = "/run/production-runtime/p9-synthetic-fixtures.json";
+  private static final String CASE_ID = "CASE_EXPLICIT_001";
+
+  private static KeyPair trustedKey;
+  private static KeyPair otherKey;
+
+  @TempDir Path tempDirectory;
+
+  @BeforeAll
+  static void generateKeys() throws Exception {
+    trustedKey = keyPair("secp256r1");
+    otherKey = keyPair("secp256r1");
+  }
+
+  @Test
+  void armsTheExactCandidateAndReleasesFrozenBindingsToEveryCallSite() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    ProductionActivationAuthority authority =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID));
+
+    ActivationDecision selector = authority.authorize(request(ActivationScope.ROOM_SELECTOR));
+    ActivationDecision graph = authority.authorize(request(ActivationScope.GRAPH_CLIENT));
+    ActivationDecision agent = authority.authorize(request(ActivationScope.AGENT_RUN));
+    ActivationDecision finalizer = authority.authorize(request(ActivationScope.FINALIZER));
+
+    assertThat(selector.allowed()).isTrue();
+    assertThat(graph.activationId()).contains(ACTIVATION_ID);
+    assertThat(agent.activationId()).contains(ACTIVATION_ID);
+    assertThat(finalizer.activationId()).contains(ACTIVATION_ID);
+    ActivationGrant grant = finalizer.grant().orElseThrow();
+    assertThat(grant.executionLane()).isEqualTo("PRODUCTION");
+    assertThat(grant.environmentId()).isEqualTo("production-runtime-env-01");
+    assertThat(grant.environmentGeneration()).isEqualTo(17);
+    assertThat(grant.candidateSha()).isEqualTo(CANDIDATE_SHA);
+    assertThat(grant.buildBindings()).isEqualTo(expectedRuntime().buildBindings());
+    assertThat(grant.graphBinding()).isEqualTo(expectedRuntime().graphBinding());
+    assertThat(grant.imageDigests()).isEqualTo(expectedRuntime().imageDigests());
+    assertThat(grant.databaseIdentities()).isEqualTo(expectedRuntime().databaseIdentities());
+    assertThat(grant.javaDomainCommitAllowed()).isTrue();
+    assertThat(grant.graphDomainWriteAllowed()).isFalse();
+    assertThat(grant.externalEffectsAllowed()).isFalse();
+    assertThat(grant.productionTrafficAllowed()).isFalse();
+    assertThat(grant.issuedAt()).isEqualTo(NOW.minusSeconds(10));
+    assertThat(grant.expiresAt()).isEqualTo(NOW.plusSeconds(3_600));
+    assertThat(replayStore.calls()).isEqualTo(1);
+  }
+
+  @Test
+  void defaultsToDenyForNoAuthorityBeanOrNoManifest() {
+    assertThat(ProductionActivationAuthority.denyAll().authorize(request(ActivationScope.FINALIZER)))
+        .extracting(ActivationDecision::allowed, ActivationDecision::reason)
+        .containsExactly(false, Reason.DEFAULT_DENY);
+    ProductionActivationAuthority missing =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(null);
+    assertThat(missing.authorize(request(ActivationScope.AGENT_RUN)).reason())
+        .isEqualTo(Reason.DEFAULT_DENY);
+  }
+
+  @Test
+  void verifiesManifestAndGraphSelfHashesBeforeRegistration() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    ObjectNode wrongManifestHash = payload();
+    wrongManifestHash.put("manifestHash", "f".repeat(64));
+    ActivationDecision manifestFailure =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(wrongManifestHash, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(manifestFailure.reason()).isEqualTo(Reason.INVALID_MANIFEST_HASH);
+
+    ObjectNode wrongGraphHash = payload();
+    ((ObjectNode) wrongGraphHash.get("graphBinding")).put("bindingHash", "f".repeat(64));
+    refreshManifestHash(wrongGraphHash);
+    ActivationDecision graphFailure =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(wrongGraphHash, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(graphFailure.reason()).isEqualTo(Reason.INVALID_GRAPH_BINDING_HASH);
+    assertThat(replayStore.calls()).isZero();
+  }
+
+  @Test
+  void rejectsExpiredFutureAndOverlongManifestsWithoutClockTolerance() throws Exception {
+    assertDenied(
+        value -> {
+          value.put("issuedAt", NOW.minusSeconds(3_600).toString());
+          value.put("expiresAt", NOW.toString());
+        },
+        Reason.EXPIRED);
+    assertDenied(
+        value -> {
+          value.put("issuedAt", NOW.plusSeconds(1).toString());
+          value.put("expiresAt", NOW.plusSeconds(300).toString());
+        },
+        Reason.NOT_YET_VALID);
+    assertDenied(
+        value -> value.put("expiresAt", NOW.plusSeconds(2_592_001).toString()),
+        Reason.WRONG_CONTRACT);
+  }
+
+  @Test
+  void acceptsOnlyExactCandidateEnvironmentGenerationAndNamespace() throws Exception {
+    assertDenied(value -> value.put("candidateSha", "d".repeat(40)), Reason.WRONG_RUNTIME);
+    assertDenied(value -> value.put("environmentId", "another-env"), Reason.WRONG_RUNTIME);
+    assertDenied(value -> value.put("environmentGeneration", 18), Reason.WRONG_RUNTIME);
+    assertDenied(
+        value -> value.put("temporalNamespace", "another-namespace"), Reason.WRONG_RUNTIME);
+  }
+
+  @Test
+  void acceptsOnlyExactBuildGraphImageAndDatabaseBindings() throws Exception {
+    assertDenied(
+        value -> ((ObjectNode) value.get("buildBindings")).put("agentBuildId", "agent-v10"),
+        Reason.WRONG_RUNTIME);
+    assertDenied(
+        value -> ((ObjectNode) value.get("graphBinding")).put("version", "graph-v10"),
+        Reason.WRONG_RUNTIME);
+    assertDenied(
+        value ->
+            ((ObjectNode) value.get("imageDigests")).put("pythonAgent", "sha256:" + "9".repeat(64)),
+        Reason.WRONG_RUNTIME);
+    assertDenied(
+        value ->
+            ((ObjectNode) ((ObjectNode) value.get("databaseIdentities")).get("domain"))
+                .put("databaseIdentity", "domain-db-other"),
+        Reason.WRONG_RUNTIME);
+  }
+
+  @Test
+  void rejectsWrongVersionLaneTenantRoomAndCaseScope() throws Exception {
+    assertDenied(
+        value -> value.put("contractVersion", "production-runtime-activation.v2"), Reason.WRONG_CONTRACT);
+    assertDenied(value -> value.put("executionLane", "SHADOW"), Reason.WRONG_CONTRACT);
+    assertDenied(value -> value.put("tenantSurrogate", "tenant-other"), Reason.WRONG_RUNTIME);
+
+    ProductionActivationAuthority authority =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID));
+    assertThat(
+            authority
+                .authorize(
+                    new ActivationRequest(
+                        ActivationScope.AGENT_RUN, "tenant-e2e", RoomType.REVIEW, CASE_ID))
+                .reason())
+        .isEqualTo(Reason.WRONG_TARGET);
+    assertThat(
+            authority
+                .authorize(
+                    new ActivationRequest(
+                        ActivationScope.AGENT_RUN,
+                        "tenant-e2e",
+                        RoomType.INTAKE,
+                        "CASE_NOT_ALLOWED"))
+                .reason())
+        .isEqualTo(Reason.WRONG_TARGET);
+  }
+
+  @Test
+  void rejectsAuthorityCeilingProductionDefaultAndDatabaseSeparationViolations() throws Exception {
+    assertDenied(
+        value -> ((ObjectNode) value.get("authority")).put("graphDomainWriteAllowed", true),
+        Reason.AUTHORITY_VIOLATION);
+    assertDenied(
+        value -> ((ObjectNode) value.get("authority")).put("productionTrafficAllowed", true),
+        Reason.AUTHORITY_VIOLATION);
+    assertDenied(
+        value ->
+            ((ObjectNode) value.get("productionDefaults")).put("productionActivation", "ENABLED"),
+        Reason.AUTHORITY_VIOLATION);
+
+    ObjectNode collision = payload();
+    ((ObjectNode) collision.get("databaseIdentities"))
+        .set("graph", ((ObjectNode) collision.get("databaseIdentities")).get("domain").deepCopy());
+    refreshHashes(collision);
+    ActivationDecision collisionDecision =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(collision, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(collisionDecision.reason()).isEqualTo(Reason.WRONG_CONTRACT);
+  }
+
+  @Test
+  void verifiesTrustedP256KeyAndExactJwtProtectedHeader() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    ActivationDecision untrusted =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), trustedKey, "untrusted-key"))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(untrusted.reason()).isEqualTo(Reason.UNTRUSTED_KEY);
+
+    ActivationDecision invalidSignature =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), otherKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(invalidSignature.reason()).isEqualTo(Reason.INVALID_SIGNATURE);
+
+    ActivationDecision wrongType =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID, "production-runtime-activation+jws"))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(wrongType.reason()).isEqualTo(Reason.WRONG_CONTRACT);
+    assertThat(replayStore.calls()).isZero();
+  }
+
+  @Test
+  void requiresCanonicalUniqueMemberAndClosedSchemaJson() throws Exception {
+    byte[] prettyPayload = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(payload());
+    ActivationDecision nonCanonical =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(signRaw(prettyPayload, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(nonCanonical.reason()).isEqualTo(Reason.NON_CANONICAL_MANIFEST);
+
+    ActivationDecision malformed =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm("not-a-compact-jws")
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(malformed.reason()).isEqualTo(Reason.MALFORMED_MANIFEST);
+
+    ObjectNode expanded = payload();
+    expanded.put("bypass", true);
+    refreshManifestHash(expanded);
+    ActivationDecision unknownField =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(expanded, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(unknownField.reason()).isEqualTo(Reason.WRONG_CONTRACT);
+  }
+
+  @Test
+  void attachesIdenticalReplicaButRejectsActivationIdOrNonceBindingConflict() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    ProductionActivationManifestVerifier verifier =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock());
+    String original = sign(payload(), trustedKey, KEY_ID);
+
+    assertThat(verifier.arm(original).authorize(request(ActivationScope.FINALIZER)).allowed())
+        .isTrue();
+    assertThat(verifier.arm(original).authorize(request(ActivationScope.FINALIZER)).allowed())
+        .isTrue();
+
+    ObjectNode conflict = payload();
+    conflict.put("nonce", "activation-nonce-" + "9".repeat(20));
+    refreshManifestHash(conflict);
+    ActivationDecision replay =
+        verifier
+            .arm(sign(conflict, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.FINALIZER));
+    assertThat(replay.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
+    assertThat(replayStore.calls()).isEqualTo(3);
+  }
+
+  @Test
+  void enforcesDurableEnvironmentGenerationHighWater() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    assertThat(
+            verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+                .arm(sign(payload(), trustedKey, KEY_ID))
+                .authorize(request(ActivationScope.AGENT_RUN))
+                .allowed())
+        .isTrue();
+
+    ObjectNode stalePayload = payload();
+    stalePayload.put("environmentGeneration", 16);
+    stalePayload.put("activationId", "p9act.v1." + "2".repeat(32));
+    stalePayload.put("nonce", "activation-nonce-" + "2".repeat(20));
+    refreshManifestHash(stalePayload);
+    ActivationDecision stale =
+        verifier(
+                replayStore,
+                ProductionActivationCaseLedger.denyAll(),
+                withGeneration(expectedRuntime(), 16),
+                fixedClock())
+            .arm(sign(stalePayload, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(stale.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_STALE);
+
+    ObjectNode conflictPayload = payload();
+    conflictPayload.put("activationId", "p9act.v1." + "3".repeat(32));
+    conflictPayload.put("nonce", "activation-nonce-" + "3".repeat(20));
+    refreshManifestHash(conflictPayload);
+    ActivationDecision conflict =
+        verifier(replayStore, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(conflictPayload, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(conflict.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
+  }
+
+  @Test
+  void failsClosedWhenReplayRegistrationFails() throws Exception {
+    ProductionActivationReplayStore failing =
+        new ProductionActivationReplayStore() {
+          @Override
+          public RegistrationResult registerOrAttach(Registration registration) {
+            throw new IllegalStateException("store unavailable");
+          }
+
+          @Override
+          public RegistrationResult attachExistingForDrain(Registration registration) {
+            throw new IllegalStateException("store unavailable");
+          }
+        };
+    ActivationDecision failure =
+        verifier(failing, ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(failure.reason()).isEqualTo(Reason.REPLAY_STORE_FAILURE);
+  }
+
+  @Test
+  void reservesSyntheticCaseBeforeEpochSelectionAndRequiresItDownstream() throws Exception {
+    RecordingCaseLedger caseLedger = new RecordingCaseLedger();
+    ProductionActivationAuthority authority =
+        verifier(new RecordingReplayStore(), caseLedger, syntheticRuntime(), fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID));
+    ActivationRequest graphBeforeSelector =
+        new ActivationRequest(
+            ActivationScope.GRAPH_CLIENT,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            "CASE_NEW_001",
+            1,
+            ActivationPurpose.NEW_ADMISSION,
+            null);
+    assertThat(authority.authorize(graphBeforeSelector).reason())
+        .isEqualTo(Reason.CASE_NOT_RESERVED);
+
+    ActivationRequest selector =
+        new ActivationRequest(
+            ActivationScope.ROOM_SELECTOR,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            "CASE_NEW_001",
+            1,
+            ActivationPurpose.NEW_ADMISSION,
+            null);
+    assertThat(authority.authorize(selector).allowed()).isTrue();
+    assertThat(authority.authorize(graphBeforeSelector).allowed()).isTrue();
+    assertThat(
+            authority
+                .authorize(
+                    new ActivationRequest(
+                        ActivationScope.FINALIZER,
+                        "tenant-e2e",
+                        RoomType.INTAKE,
+                        "WRONG_001",
+                        1,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
+                .reason())
+        .isEqualTo(Reason.WRONG_TARGET);
+  }
+
+  @Test
+  void enforcesSyntheticCaseCapacityAndNoRealDataOrWildcardPrefix() throws Exception {
+    RecordingCaseLedger caseLedger = new RecordingCaseLedger(1);
+    ProductionActivationAuthority authority =
+        verifier(new RecordingReplayStore(), caseLedger, syntheticRuntime(), fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID));
+    assertThat(
+            authority
+                .authorize(
+                    new ActivationRequest(
+                        ActivationScope.ROOM_SELECTOR,
+                        "tenant-e2e",
+                        RoomType.INTAKE,
+                        "CASE_NEW_001",
+                        1,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
+                .allowed())
+        .isTrue();
+    assertThat(
+            authority
+                .authorize(
+                    new ActivationRequest(
+                        ActivationScope.ROOM_SELECTOR,
+                        "tenant-e2e",
+                        RoomType.INTAKE,
+                        "CASE_NEW_002",
+                        2,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
+                .reason())
+        .isEqualTo(Reason.CASE_CAPACITY_EXHAUSTED);
+
+    assertThatThrownBy(
+            () -> new IsolatedSyntheticNewCases("*", 1, "fixtures-v1", fixtureHash(), false, false))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                new IsolatedSyntheticNewCases(
+                    "CASE_NEW_", 1, "fixtures-v1", fixtureHash(), true, false))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void preservesGlobalGeneratedCaseTombstoneAcrossActivationsAndSlots() {
+    RecordingCaseLedger ledger = new RecordingCaseLedger();
+    ProductionActivationCaseLedger.Reservation first =
+        reservation(ACTIVATION_ID, 1, "CASE_NEW_GLOBAL_001");
+    assertThat(
+            ledger.apply(
+                ProductionActivationCaseLedger.Action.RESERVE_BEFORE_EPOCH_SELECTION, first))
+        .isEqualTo(ProductionActivationCaseLedger.ReservationResult.RESERVED);
+    assertThat(ledger.apply(ProductionActivationCaseLedger.Action.REQUIRE_EXISTING, first))
+        .isEqualTo(ProductionActivationCaseLedger.ReservationResult.ALREADY_RESERVED_IDENTICALLY);
+
+    ProductionActivationCaseLedger.Reservation crossActivation =
+        reservation("p9act.v1." + "9".repeat(32), 1, "CASE_NEW_GLOBAL_001");
+    assertThat(
+            ledger.apply(
+                ProductionActivationCaseLedger.Action.RESERVE_BEFORE_EPOCH_SELECTION,
+                crossActivation))
+        .isEqualTo(
+            ProductionActivationCaseLedger.ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT);
+  }
+
+  @Test
+  void recomputesConfiguredFixtureBytesBeforeAnyCaseReservation() throws Exception {
+    ObjectNode changedFixture = syntheticFixture();
+    ((ObjectNode) ((ArrayNode) changedFixture.get("scenarios")).get(0))
+        .put("inputHash", "f".repeat(64));
+    ProductionSyntheticFixtureSource wrongBytes =
+        fixtureSetId ->
+            new ProductionSyntheticFixtureSource.ConfiguredFixture(
+                FIXTURE_PATH, ContractJson.canonicalize(changedFixture));
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+
+    ActivationDecision decision =
+        verifier(
+                replayStore,
+                new RecordingCaseLedger(),
+                new RecordingLifecycleStore(),
+                wrongBytes,
+                syntheticRuntime(),
+                fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID))
+            .authorize(
+                new ActivationRequest(
+                    ActivationScope.ROOM_SELECTOR,
+                    "tenant-e2e",
+                    RoomType.INTAKE,
+                    "CASE_NEW_001",
+                    1,
+                    ActivationPurpose.NEW_ADMISSION,
+                    null));
+    assertThat(decision.reason()).isEqualTo(Reason.WRONG_RUNTIME);
+    assertThat(replayStore.calls()).isZero();
+
+    ProductionSyntheticFixtureSource nonCanonical =
+        fixtureSetId -> {
+          try {
+            return new ProductionSyntheticFixtureSource.ConfiguredFixture(
+                FIXTURE_PATH,
+                MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(syntheticFixture()));
+          } catch (Exception failure) {
+            throw new IllegalStateException(failure);
+          }
+        };
+    ActivationDecision nonCanonicalDecision =
+        verifier(
+                new RecordingReplayStore(),
+                new RecordingCaseLedger(),
+                new RecordingLifecycleStore(),
+                nonCanonical,
+                syntheticRuntime(),
+                fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID))
+            .authorize(
+                new ActivationRequest(
+                    ActivationScope.ROOM_SELECTOR,
+                    "tenant-e2e",
+                    RoomType.INTAKE,
+                    "CASE_NEW_001",
+                    1,
+                    ActivationPurpose.NEW_ADMISSION,
+                    null));
+    assertThat(nonCanonicalDecision.reason()).isEqualTo(Reason.NON_CANONICAL_MANIFEST);
+  }
+
+  @Test
+  void drainsOnlyDurablyAdmittedCommandsThenRevokesInOrder() throws Exception {
+    MutableClock clock = new MutableClock(NOW);
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    RecordingLifecycleStore lifecycle = new RecordingLifecycleStore();
+    ObjectNode shortLived = payload();
+    shortLived.put("expiresAt", NOW.plusSeconds(60).toString());
+    refreshManifestHash(shortLived);
+    String compact = sign(shortLived, trustedKey, KEY_ID);
+    ProductionActivationManifestVerifier verifier =
+        verifier(
+            replayStore,
+            ProductionActivationCaseLedger.denyAll(),
+            lifecycle,
+            fixtureSource(),
+            expectedRuntime(),
+            clock);
+    ProductionActivationAuthority authority = verifier.arm(compact);
+    ActivationDecision active = authority.authorize(request(ActivationScope.AGENT_RUN));
+    ActivationGrant grant = active.grant().orElseThrow();
+    DrainAcceptedCommand accepted = drainCommand(NOW.plusSeconds(30));
+    lifecycle.accept(accepted);
+
+    clock.advance(Duration.ofSeconds(60));
+    assertThat(authority.authorize(request(ActivationScope.AGENT_RUN)).reason())
+        .isEqualTo(Reason.DRAIN_PROOF_REQUIRED);
+    ActivationRequest drainRequest =
+        new ActivationRequest(
+            ActivationScope.FINALIZER,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            CASE_ID,
+            null,
+            ActivationPurpose.DRAIN_ACCEPTED_COMMAND,
+            accepted);
+    ActivationDecision draining = authority.authorize(drainRequest);
+    assertThat(draining.allowed()).isTrue();
+    assertThat(draining.authorizationMode())
+        .contains(ActivationDecision.AuthorizationMode.DRAIN_ACCEPTED_COMMAND);
+    assertThat(verifier.armForDrain(compact, accepted).authorize(drainRequest).allowed()).isTrue();
+
+    ActivationIdentity identity =
+        new ActivationIdentity(
+            grant.environmentId(),
+            grant.environmentGeneration(),
+            grant.activationId(),
+            grant.manifestHash());
+    assertThat(
+            lifecycle.markDrained(
+                identity, drainProof(1, 0, true, NOW.plusSeconds(61))))
+        .isEqualTo(TransitionResult.REJECTED_UNRESOLVED_WORK);
+    assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(62)))
+        .isEqualTo(TransitionResult.REJECTED_WRONG_STATE);
+    assertThat(
+            lifecycle.markDrained(
+                identity, drainProof(0, 0, true, NOW.plusSeconds(63))))
+        .isEqualTo(TransitionResult.TRANSITIONED);
+    assertThat(authority.authorize(drainRequest).reason()).isEqualTo(Reason.DRAINED);
+    assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(64)))
+        .isEqualTo(TransitionResult.TRANSITIONED);
+    assertThat(authority.authorize(drainRequest).reason()).isEqualTo(Reason.REVOKED);
+  }
+
+  @Test
+  void rechecksExpiryOnEveryAuthorityDecision() throws Exception {
+    MutableClock clock = new MutableClock(NOW);
+    ObjectNode shortLived = payload();
+    shortLived.put("expiresAt", NOW.plusSeconds(60).toString());
+    refreshManifestHash(shortLived);
+    ProductionActivationAuthority authority =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), clock)
+            .arm(sign(shortLived, trustedKey, KEY_ID));
+    assertThat(authority.authorize(request(ActivationScope.FINALIZER)).allowed()).isTrue();
+    clock.advance(Duration.ofSeconds(60));
+    assertThat(authority.authorize(request(ActivationScope.FINALIZER)).reason())
+        .isEqualTo(Reason.DRAIN_PROOF_REQUIRED);
+  }
+
+  @Test
+  void permitsOnlyDedicatedTargetProfileAndFrozenZeroSkewPolicy() {
+    ProductionActivationExpectedRuntime target = expectedRuntime();
+    assertThatThrownBy(() -> withProfile(target, "local"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("dedicated production-runtime");
+    assertThatThrownBy(() -> withProfile(target, "prod"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("dedicated production-runtime");
+    assertThatThrownBy(
+            () ->
+                new ProductionActivationManifestVerifier(
+                    keySet(),
+                    new RecordingReplayStore(),
+                    ProductionActivationCaseLedger.denyAll(),
+                    new RecordingLifecycleStore(),
+                    fixtureSource(),
+                    fixedMeasurementProvider(expectedRuntime()),
+                    fixedClock(),
+                    Duration.ofSeconds(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("zero clock skew");
+  }
+
+  @Test
+  void rejectsMeasuredCredentialsPrivilegesDefaultsAndNonisolatedDeployment() {
+    assertThatThrownBy(
+            () -> measuredAuthorityFacts(false, false, false, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, true, false, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, true, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, false, true, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, false, false, "LEGACY", "ENABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void rejectsSamePhysicalDatabaseEvenWhenRuntimePrincipalsDiffer() {
+    DatabaseIdentity domain =
+        new DatabaseIdentity(
+            "pg-system-id/shared-100", "pg-database-oid/shared-200", "pg-role-oid/301");
+    assertThatThrownBy(
+            () ->
+                new DatabaseIdentities(
+                    domain,
+                    new DatabaseIdentity(
+                        "pg-system-id/shared-100", "pg-database-oid/other-201", "pg-role-oid/302")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("physically distinct");
+    assertThatThrownBy(
+            () ->
+                new DatabaseIdentities(
+                    domain,
+                    new DatabaseIdentity(
+                        "pg-system-id/other-101", "pg-database-oid/shared-200", "pg-role-oid/302")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("physically distinct");
+  }
+
+  @Test
+  void exposesNoPublicCallerConstructedRuntimeAuthorityPath() {
+    assertThat(ProductionActivationExpectedRuntime.class.getConstructors()).isEmpty();
+    assertThat(MeasuredRuntime.class.getConstructors()).isEmpty();
+    assertThat(ProductionRuntimeMeasurementProvider.class.isSealed()).isTrue();
+    assertThat(
+            Arrays.stream(ProductionActivationManifestVerifier.class.getMethods())
+                .filter(method -> method.getName().equals("arm"))
+                .map(Method::getParameterTypes)
+                .flatMap(Arrays::stream))
+        .doesNotContain(ProductionActivationExpectedRuntime.class, MeasuredRuntime.class);
+  }
+
+  @Test
+  void measurementFailuresNeverReachReplayRegistration() throws Exception {
+    assertMeasuredProviderDenied(
+        environment -> environment.setActiveProfiles("production-runtime", "prod"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment ->
+            environment.setProperty(
+                "app.production-runtime.measurement.production-formal-selector-default", "TEMPORAL"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> environment.setProperty("APP_GRAPH_DOMAIN_PASSWORD", "forbidden"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+
+    DatabaseIdentity shared =
+        new DatabaseIdentity(
+            "pg-system-id/shared-100", "pg-database-oid/shared-200", "pg-role-oid/301");
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(shared, "domain_runtime", false),
+            observation(
+                new DatabaseIdentity(
+                    "pg-system-id/shared-100", "pg-database-oid/graph-201", "pg-role-oid/302"),
+                "graph_runtime",
+                false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(domainIdentity(), "domain_runtime", false),
+            observation(graphIdentity(), "graph_runtime", true)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(domainIdentity(), "domain_runtime", true),
+            observation(graphIdentity(), "graph_runtime", false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(
+                new DatabaseIdentity(
+                    "pg-system-id/unprovisioned-domain",
+                    domainIdentity().databaseIdentity(),
+                    domainIdentity().runtimePrincipalIdentity()),
+                "domain_runtime",
+                false),
+            observation(graphIdentity(), "graph_runtime", false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+  }
+
+  @Test
+  void forgedIsolationAttestationNeverReachesReplayRegistration() throws Exception {
+    Path forged = tempDirectory.resolve("forged-isolation-attestation.jws");
+    Files.writeString(forged, "not-a-signed-attestation", StandardCharsets.US_ASCII);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    ProductionRuntimeMeasurementProvider provider =
+        measuredProvider(safeEnvironment(), safeDatabaseProbe(), forged);
+    ActivationDecision decision =
+        verifier(replay, provider, fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(decision.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(replay.calls()).isZero();
+  }
+
+  @Test
+  void concreteMeasurementAcceptsOnlyIndependentlySignedExactAttestation() throws Exception {
+    Path attestation = tempDirectory.resolve("isolation-attestation.jws");
+    Files.writeString(
+        attestation,
+        sign(
+            isolationAttestationPayload(),
+            otherKey,
+            "isolation-attestation-key",
+            ProductionIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    ProductionRuntimeMeasurementProvider provider =
+        measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation);
+    assertThat(
+            verifier(replay, provider, fixedClock())
+                .arm(sign(payload(), trustedKey, KEY_ID))
+                .authorize(request(ActivationScope.AGENT_RUN))
+                .allowed())
+        .isTrue();
+    assertThat(replay.calls()).isEqualTo(1);
+
+    ObjectNode wrongCandidate = isolationAttestationPayload();
+    wrongCandidate.put("candidateSha", "f".repeat(40));
+    refreshAttestationHash(wrongCandidate);
+    Files.writeString(
+        attestation,
+        sign(
+            wrongCandidate,
+            otherKey,
+            "isolation-attestation-key",
+            ProductionIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore rejectedReplay = new RecordingReplayStore();
+    ActivationDecision rejected =
+        verifier(
+                rejectedReplay,
+                measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation),
+                fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(rejected.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(rejectedReplay.calls()).isZero();
+
+    ObjectNode wrongArtifact = isolationAttestationPayload();
+    wrongArtifact.put("artifactDigest", "f".repeat(64));
+    refreshAttestationHash(wrongArtifact);
+    Files.writeString(
+        attestation,
+        sign(
+            wrongArtifact,
+            otherKey,
+            "isolation-attestation-key",
+            ProductionIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore artifactReplay = new RecordingReplayStore();
+    ActivationDecision artifactRejected =
+        verifier(
+                artifactReplay,
+                measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation),
+                fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(artifactRejected.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(artifactReplay.calls()).isZero();
+  }
+
+  @Test
+  void rejectsNonP256PublicKeys() throws Exception {
+    KeyPair p384 = keyPair("secp384r1");
+    assertThatThrownBy(
+            () ->
+                ProductionActivationPublicKeySet.allowlisted(
+                    Map.of("wrong-curve", (java.security.interfaces.ECPublicKey) p384.getPublic())))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("P-256");
+  }
+
+  private static void assertDenied(Consumer<ObjectNode> mutation, Reason expectedReason)
+      throws Exception {
+    ObjectNode changed = payload();
+    mutation.accept(changed);
+    refreshHashes(changed);
+    ActivationDecision decision =
+        verifier(new RecordingReplayStore(), ProductionActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(changed, trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(decision.allowed()).isFalse();
+    assertThat(decision.reason()).isEqualTo(expectedReason);
+  }
+
+  private static ProductionActivationManifestVerifier verifier(
+      ProductionActivationReplayStore replayStore,
+      ProductionActivationCaseLedger caseLedger,
+      Clock clock) {
+    return verifier(replayStore, caseLedger, expectedRuntime(), clock);
+  }
+
+  private static ProductionActivationManifestVerifier verifier(
+      ProductionActivationReplayStore replayStore,
+      ProductionRuntimeMeasurementProvider measurementProvider,
+      Clock clock) {
+    return new ProductionActivationManifestVerifier(
+        keySet(),
+        replayStore,
+        ProductionActivationCaseLedger.denyAll(),
+        new RecordingLifecycleStore(),
+        fixtureSource(),
+        measurementProvider,
+        clock,
+        Duration.ZERO);
+  }
+
+  private static ProductionActivationManifestVerifier verifier(
+      ProductionActivationReplayStore replayStore,
+      ProductionActivationCaseLedger caseLedger,
+      ProductionActivationExpectedRuntime runtime,
+      Clock clock) {
+    return verifier(
+        replayStore, caseLedger, new RecordingLifecycleStore(), fixtureSource(), runtime, clock);
+  }
+
+  private static ProductionActivationManifestVerifier verifier(
+      ProductionActivationReplayStore replayStore,
+      ProductionActivationCaseLedger caseLedger,
+      ProductionActivationLifecycleStore lifecycleStore,
+      Clock clock) {
+    return verifier(
+        replayStore, caseLedger, lifecycleStore, fixtureSource(), expectedRuntime(), clock);
+  }
+
+  private static ProductionActivationManifestVerifier verifier(
+      ProductionActivationReplayStore replayStore,
+      ProductionActivationCaseLedger caseLedger,
+      ProductionActivationLifecycleStore lifecycleStore,
+      ProductionSyntheticFixtureSource syntheticFixtureSource,
+      ProductionActivationExpectedRuntime runtime,
+      Clock clock) {
+    return new ProductionActivationManifestVerifier(
+        keySet(),
+        replayStore,
+        caseLedger,
+        lifecycleStore,
+        syntheticFixtureSource,
+        fixedMeasurementProvider(runtime),
+        clock,
+        Duration.ZERO);
+  }
+
+  private static ProductionActivationPublicKeySet keySet() {
+    return ProductionActivationPublicKeySet.allowlisted(
+        Map.of(KEY_ID, (java.security.interfaces.ECPublicKey) trustedKey.getPublic()));
+  }
+
+  private void assertMeasuredProviderDenied(
+      Consumer<MockEnvironment> mutation,
+      SpringJdbcProductionRuntimeMeasurementProvider.DatabaseProbe databaseProbe,
+      Reason expectedReason)
+      throws Exception {
+    MockEnvironment environment = safeEnvironment();
+    mutation.accept(environment);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    ProductionRuntimeMeasurementProvider provider =
+        measuredProvider(
+            environment, databaseProbe, tempDirectory.resolve("absent-attestation.jws"));
+    ActivationDecision decision =
+        verifier(replay, provider, fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(decision.reason()).isEqualTo(expectedReason);
+    assertThat(replay.calls()).isZero();
+  }
+
+  private static ProductionRuntimeMeasurementProvider measuredProvider(
+      MockEnvironment environment,
+      SpringJdbcProductionRuntimeMeasurementProvider.DatabaseProbe databaseProbe,
+      Path attestationPath) {
+    ProductionIsolationAttestationPublicKeySet isolationKeys =
+        ProductionIsolationAttestationPublicKeySet.allowlisted(
+            Map.of(
+                "isolation-attestation-key",
+                (java.security.interfaces.ECPublicKey) otherKey.getPublic()));
+    return new SpringJdbcProductionRuntimeMeasurementProvider(
+        environment,
+        mock(DataSource.class),
+        mock(DataSource.class),
+        databaseProbe,
+        () ->
+            new SpringJdbcProductionRuntimeMeasurementProvider.ArtifactMeasurement(
+                SpringJdbcProductionRuntimeMeasurementProvider.ARTIFACT_MARKER, "0".repeat(64)),
+        new ProductionIsolationAttestationVerifier(isolationKeys, fixedClock()),
+        attestationPath);
+  }
+
+  private static MockEnvironment safeEnvironment() {
+    MockEnvironment environment = new MockEnvironment();
+    environment.setActiveProfiles("production-runtime", "control-worker");
+    environment.setProperty(
+        "app.production-runtime.measurement.artifact-marker",
+        SpringJdbcProductionRuntimeMeasurementProvider.ARTIFACT_MARKER);
+    environment.setProperty("app.temporal.worker.enabled", "true");
+    environment.setProperty("app.temporal.worker.role", "CONTROL");
+    environment.setProperty("app.temporal.worker.versioning-mode", "BUILD_ID");
+    environment.setProperty("app.temporal.worker.build-id", "control-v9");
+    environment.setProperty("app.temporal.namespace", "production-runtime-namespace");
+    environment.setProperty("app.production-runtime.measurement.environment-id", "production-runtime-env-01");
+    environment.setProperty("app.production-runtime.measurement.environment-generation", "17");
+    environment.setProperty("app.production-runtime.measurement.candidate-sha", CANDIDATE_SHA);
+    environment.setProperty("app.production-runtime.measurement.tenant-surrogate", "tenant-e2e");
+    environment.setProperty("app.production-runtime.measurement.case-scope.mode", "EXPLICIT_CASE_IDS");
+    environment.setProperty("app.production-runtime.measurement.case-scope.allowed-case-ids", CASE_ID);
+    environment.setProperty("app.production-runtime.measurement.allowed-room-types", "INTAKE,EVIDENCE");
+    environment.setProperty("app.production-runtime.measurement.build.case", "control-v9");
+    environment.setProperty("app.production-runtime.measurement.build.control", "control-v9");
+    environment.setProperty("app.production-runtime.measurement.build.agent", "agent-v9");
+    environment.setProperty("app.production-runtime.measurement.graph.key", "all-rooms.production-runtime.v2");
+    environment.setProperty("app.production-runtime.measurement.graph.version", "graph-v9");
+    environment.setProperty(
+        "app.production-runtime.measurement.graph.checkpoint-schema-version", "checkpoint-v9");
+    environment.setProperty("app.production-runtime.measurement.graph.binding-hash", graphBindingHash());
+    environment.setProperty("app.production-runtime.measurement.graph.code-build-id", "graph-code-v9");
+    environment.setProperty("app.production-runtime.measurement.images.java-api", digest('4'));
+    environment.setProperty(
+        "app.production-runtime.measurement.images.temporal-control-worker", digest('5'));
+    environment.setProperty("app.production-runtime.measurement.images.temporal-agent-worker", digest('6'));
+    environment.setProperty("app.production-runtime.measurement.images.python-agent", digest('7'));
+    environment.setProperty("app.production-runtime.measurement.images.frontend", digest('8'));
+    environment.setProperty(
+        "app.production-runtime.measurement.database.domain.cluster-identity",
+        domainIdentity().clusterIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.database.domain.database-identity",
+        domainIdentity().databaseIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.database.domain.runtime-principal-identity",
+        domainIdentity().runtimePrincipalIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.database.graph.cluster-identity",
+        graphIdentity().clusterIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.database.graph.database-identity",
+        graphIdentity().databaseIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.database.graph.runtime-principal-identity",
+        graphIdentity().runtimePrincipalIdentity());
+    environment.setProperty(
+        "app.production-runtime.measurement.environment-class", "ISOLATED_PREPRODUCTION");
+    environment.setProperty("app.production-runtime.measurement.graph-output-authority", "PROPOSAL_ONLY");
+    environment.setProperty("app.production-runtime.measurement.formal-writer", "JAVA_FINALIZER_ONLY");
+    environment.setProperty(
+        "app.production-runtime.measurement.production-formal-selector-default", "LEGACY");
+    environment.setProperty("app.production-runtime.measurement.activation-default", "DISABLED");
+    environment.setProperty(
+        "app.production-runtime.measurement.network-isolation-mode", "ATTESTED_DENY_EXTERNAL_EGRESS");
+    environment.setProperty("app.production-runtime.measurement.external-effects-enabled", "false");
+    return environment;
+  }
+
+  private static SpringJdbcProductionRuntimeMeasurementProvider.DatabaseProbe safeDatabaseProbe() {
+    return databaseProbe(
+        observation(domainIdentity(), "domain_runtime", false),
+        observation(graphIdentity(), "graph_runtime", false));
+  }
+
+  private static SpringJdbcProductionRuntimeMeasurementProvider.DatabaseProbe databaseProbe(
+      SpringJdbcProductionRuntimeMeasurementProvider.DatabaseObservation domain,
+      SpringJdbcProductionRuntimeMeasurementProvider.DatabaseObservation graph) {
+    AtomicInteger measurements = new AtomicInteger();
+    return new SpringJdbcProductionRuntimeMeasurementProvider.DatabaseProbe() {
+      @Override
+      public SpringJdbcProductionRuntimeMeasurementProvider.DatabaseObservation measure(
+          DataSource dataSource) {
+        return measurements.getAndIncrement() == 0 ? domain : graph;
+      }
+
+      @Override
+      public boolean peerPrincipalCanConnect(DataSource dataSource, String peerRoleName) {
+        return false;
+      }
+    };
+  }
+
+  private static SpringJdbcProductionRuntimeMeasurementProvider.DatabaseObservation observation(
+      DatabaseIdentity identity, String roleName, boolean elevated) {
+    return new SpringJdbcProductionRuntimeMeasurementProvider.DatabaseObservation(
+        identity, roleName, elevated, false, false, false, false);
+  }
+
+  private static DatabaseIdentity domainIdentity() {
+    return databaseIdentities().domain();
+  }
+
+  private static DatabaseIdentity graphIdentity() {
+    return databaseIdentities().graph();
+  }
+
+  private static ProductionRuntimeMeasurementProvider fixedMeasurementProvider(
+      ProductionActivationExpectedRuntime runtime) {
+    DatabasePrivilegeEvidence privileges =
+        new DatabasePrivilegeEvidence(false, false, false, false, false, false);
+    ProductionIsolationAttestationVerifier.VerifiedAttestation attestation =
+        new ProductionIsolationAttestationVerifier.VerifiedAttestation(
+            "isolation-attestation-key",
+            "isolation-attestation-nonce-00000000",
+            "1".repeat(64),
+            NOW.minusSeconds(10),
+            NOW.plusSeconds(600));
+    MeasurementEvidence evidence =
+        new MeasurementEvidence(
+            Set.of("production-runtime", "agent-worker"),
+            SpringJdbcProductionRuntimeMeasurementProvider.ARTIFACT_MARKER,
+            "0".repeat(64),
+            "AGENT",
+            privileges,
+            privileges,
+            attestation);
+    return new FixedMeasurementProvider(new MeasuredRuntime(runtime, evidence));
+  }
+
+  private static ProductionActivationExpectedRuntime expectedRuntime() {
+    return runtime(new ExplicitCaseIds(Set.of(CASE_ID)));
+  }
+
+  private static ProductionActivationExpectedRuntime syntheticRuntime() {
+    return runtime(
+        new IsolatedSyntheticNewCases("CASE_NEW_", 2, "fixtures-v1", fixtureHash(), false, false));
+  }
+
+  private static ProductionActivationExpectedRuntime runtime(
+      ProductionActivationExpectedRuntime.CaseScope caseScope) {
+    return new ProductionActivationExpectedRuntime(
+        "production-runtime",
+        "production-runtime-env-01",
+        17,
+        CANDIDATE_SHA,
+        "tenant-e2e",
+        caseScope,
+        caseScope instanceof IsolatedSyntheticNewCases
+            ? Set.of(RoomType.values())
+            : Set.of(RoomType.INTAKE, RoomType.EVIDENCE),
+        new BuildBindings("control-v9", "control-v9", "agent-v9"),
+        new GraphBinding(
+                "all-rooms.production-runtime.v2",
+            "graph-v9",
+            "checkpoint-v9",
+            graphBindingHash(),
+            "graph-code-v9"),
+        new ImageDigests(digest('4'), digest('5'), digest('6'), digest('7'), digest('8')),
+        "production-runtime-namespace",
+        databaseIdentities(),
+        caseScope instanceof IsolatedSyntheticNewCases synthetic
+            ? Optional.of(
+                new SyntheticFixtureDeployment(
+                    synthetic.fixtureSetId(), FIXTURE_PATH, fixtureHash()))
+            : Optional.empty(),
+        authorityFacts());
+  }
+
+  private static ProductionActivationExpectedRuntime withProfile(
+      ProductionActivationExpectedRuntime source, String profile) {
+    return new ProductionActivationExpectedRuntime(
+        profile,
+        source.environmentId(),
+        source.environmentGeneration(),
+        source.candidateSha(),
+        source.tenantSurrogate(),
+        source.caseScope(),
+        source.allowedRoomTypes(),
+        source.buildBindings(),
+        source.graphBinding(),
+        source.imageDigests(),
+        source.temporalNamespace(),
+        source.databaseIdentities(),
+        source.syntheticFixtureDeployment(),
+        source.authorityFacts());
+  }
+
+  private static ProductionActivationExpectedRuntime withGeneration(
+      ProductionActivationExpectedRuntime source, long generation) {
+    return new ProductionActivationExpectedRuntime(
+        source.appProfile(),
+        source.environmentId(),
+        generation,
+        source.candidateSha(),
+        source.tenantSurrogate(),
+        source.caseScope(),
+        source.allowedRoomTypes(),
+        source.buildBindings(),
+        source.graphBinding(),
+        source.imageDigests(),
+        source.temporalNamespace(),
+        source.databaseIdentities(),
+        source.syntheticFixtureDeployment(),
+        source.authorityFacts());
+  }
+
+  private static ProductionActivationCaseLedger.Reservation reservation(
+      String activationId, int slot, String caseId) {
+    return new ProductionActivationCaseLedger.Reservation(
+        "production-runtime-env-01",
+        17,
+        activationId,
+        slot,
+        caseId,
+        "CASE_NEW_",
+        2,
+        "fixtures-v1",
+        fixtureHash());
+  }
+
+  private static DrainAcceptedCommand drainCommand(Instant admittedAt) {
+    return new DrainAcceptedCommand(
+        "command-001", "a".repeat(64), "b".repeat(64), 1, 11, admittedAt);
+  }
+
+  private static DatabaseIdentities databaseIdentities() {
+    return new DatabaseIdentities(
+        new DatabaseIdentity("pg-system-id/domain-101", "pg-database-oid/201", "pg-role-oid/301"),
+        new DatabaseIdentity("pg-system-id/graph-102", "pg-database-oid/202", "pg-role-oid/302"));
+  }
+
+  private static MeasuredAuthorityFacts authorityFacts() {
+    return measuredAuthorityFacts(true, false, false, false, "LEGACY", "DISABLED");
+  }
+
+  private static MeasuredAuthorityFacts measuredAuthorityFacts(
+      boolean isolated,
+      boolean graphCredentials,
+      boolean graphPrivileges,
+      boolean graphWrites,
+      String formalSelector,
+      String targetActivationDefault) {
+    return new MeasuredAuthorityFacts(
+        isolated,
+        "ISOLATED_PREPRODUCTION",
+        "PROPOSAL_ONLY",
+        graphCredentials,
+        graphPrivileges,
+        graphWrites,
+        "JAVA_FINALIZER_ONLY",
+        true,
+        false,
+        false,
+        false,
+        false,
+        formalSelector,
+        targetActivationDefault);
+  }
+
+  private static ProductionSyntheticFixtureSource fixtureSource() {
+    byte[] bytes = ContractJson.canonicalize(syntheticFixture());
+    return fixtureSetId ->
+        new ProductionSyntheticFixtureSource.ConfiguredFixture(FIXTURE_PATH, bytes);
+  }
+
+  private static ObjectNode payload() {
+    ObjectNode payload = basePayload();
+    ObjectNode scope = payload.putObject("caseScope");
+    scope.put("mode", "EXPLICIT_CASE_IDS");
+    scope.putArray("allowedCaseIds").add(CASE_ID);
+    refreshHashes(payload);
+    return payload;
+  }
+
+  private static ObjectNode isolationAttestationPayload() {
+    DatabasePrivilegeEvidence privileges =
+        new DatabasePrivilegeEvidence(false, false, false, false, false, false);
+    ObjectNode payload = MAPPER.createObjectNode();
+    payload.put("schemaVersion", ProductionIsolationAttestationVerifier.SCHEMA_VERSION);
+    payload.put("attestationNonce", "isolation-attestation-nonce-00000000");
+    payload.put("environmentId", "production-runtime-env-01");
+    payload.put("environmentGeneration", 17);
+    payload.put("candidateSha", CANDIDATE_SHA);
+    payload.put("artifactDigest", "0".repeat(64));
+    payload.put("issuedAt", NOW.minusSeconds(10).toString());
+    payload.put("expiresAt", NOW.plusSeconds(600).toString());
+    payload.put(
+        "imageDigestsHash",
+        ProductionIsolationAttestationVerifier.imageDigestsHash(expectedRuntime().imageDigests()));
+    payload.put(
+        "databaseMeasurementHash",
+        ProductionIsolationAttestationVerifier.databaseMeasurementHash(
+            databaseIdentities(), privileges, privileges));
+    payload.put("networkIsolationEnforced", true);
+    payload.put("externalEffectEndpointsEnabled", false);
+    payload.put("graphDomainCredentialsPresent", false);
+    payload.put("graphDomainPrivilegesPresent", false);
+    refreshAttestationHash(payload);
+    return payload;
+  }
+
+  private static void refreshAttestationHash(ObjectNode payload) {
+    ObjectNode source = payload.deepCopy();
+    source.remove("attestationHash");
+    payload.put("attestationHash", ContractJson.sha256Hex(source));
+  }
+
+  private static ObjectNode syntheticPayload() {
+    ObjectNode payload = basePayload();
+    ArrayNode rooms = payload.putArray("allowedRoomTypes");
+    rooms.add("INTAKE");
+    rooms.add("EVIDENCE");
+    rooms.add("HEARING");
+    rooms.add("REVIEW");
+    ObjectNode scope = payload.putObject("caseScope");
+    scope.put("mode", "ISOLATED_SYNTHETIC_NEW_CASES");
+    scope.put("caseIdPrefix", "CASE_NEW_");
+    scope.put("maxCases", 2);
+    scope.put("fixtureSetId", "fixtures-v1");
+    scope.put("fixtureSetHash", fixtureHash());
+    scope.put("containsRealCaseOrPartyData", false);
+    scope.put("externalEffectsAllowed", false);
+    refreshHashes(payload);
+    return payload;
+  }
+
+  private static ObjectNode basePayload() {
+    ObjectNode payload = MAPPER.createObjectNode();
+    payload.put("contractVersion", "production-runtime-activation.v1");
+    payload.put("activationId", ACTIVATION_ID);
+    payload.put("executionLane", "PRODUCTION");
+    payload.put("environmentId", "production-runtime-env-01");
+    payload.put("environmentGeneration", 17);
+    payload.put("candidateSha", CANDIDATE_SHA);
+    payload.put("issuedAt", NOW.minusSeconds(10).toString());
+    payload.put("expiresAt", NOW.plusSeconds(3_600).toString());
+    payload.put("nonce", NONCE);
+    payload.put("tenantSurrogate", "tenant-e2e");
+    ArrayNode rooms = payload.putArray("allowedRoomTypes");
+    rooms.add("INTAKE");
+    rooms.add("EVIDENCE");
+    ObjectNode builds = payload.putObject("buildBindings");
+    builds.put("caseBuildId", "control-v9");
+    builds.put("controlBuildId", "control-v9");
+    builds.put("agentBuildId", "agent-v9");
+    ObjectNode graph = payload.putObject("graphBinding");
+        graph.put("key", "all-rooms.production-runtime.v2");
+    graph.put("version", "graph-v9");
+    graph.put("checkpointSchemaVersion", "checkpoint-v9");
+    graph.put("codeBuildId", "graph-code-v9");
+    ObjectNode images = payload.putObject("imageDigests");
+    images.put("javaApi", digest('4'));
+    images.put("temporalControlWorker", digest('5'));
+    images.put("temporalAgentWorker", digest('6'));
+    images.put("pythonAgent", digest('7'));
+    images.put("frontend", digest('8'));
+    payload.put("temporalNamespace", "production-runtime-namespace");
+    ObjectNode databases = payload.putObject("databaseIdentities");
+    database(
+        databases.putObject("domain"),
+        "pg-system-id/domain-101",
+        "pg-database-oid/201",
+        "pg-role-oid/301");
+    database(
+        databases.putObject("graph"),
+        "pg-system-id/graph-102",
+        "pg-database-oid/202",
+        "pg-role-oid/302");
+    ObjectNode authority = payload.putObject("authority");
+    authority.put("environmentClass", "ISOLATED_PREPRODUCTION");
+    authority.put("graphOutputAuthority", "PROPOSAL_ONLY");
+    authority.put("graphDomainCredentialsPresent", false);
+    authority.put("graphDomainWriteAllowed", false);
+    authority.put("formalWriter", "JAVA_FINALIZER_ONLY");
+    authority.put("javaDomainCommitAllowed", true);
+    authority.put("externalEffectsAllowed", false);
+    authority.put("productionTrafficAllowed", false);
+    authority.put("productionPromotionAuthority", false);
+    authority.put("migrationPromotionAuthority", false);
+    ObjectNode defaults = payload.putObject("productionDefaults");
+    defaults.put("formalCaseSelector", "LEGACY");
+    defaults.put("productionActivation", "DISABLED");
+    return payload;
+  }
+
+  private static ObjectNode syntheticFixture() {
+    ObjectNode fixture = MAPPER.createObjectNode();
+    fixture.put("schemaVersion", "production-runtime-synthetic-fixture-set.v1");
+    fixture.put("fixtureSetId", "fixtures-v1");
+    fixture.put("caseIdPrefix", "CASE_NEW_");
+    fixture.put("maximumCases", 2);
+    ArrayNode rooms = fixture.putArray("roomTypes");
+    rooms.add("INTAKE");
+    rooms.add("EVIDENCE");
+    rooms.add("HEARING");
+    rooms.add("REVIEW");
+    ArrayNode scenarios = fixture.putArray("scenarios");
+    fixtureScenario(scenarios.addObject(), "fixture-intake", "INTAKE", '1', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-evidence", "EVIDENCE", '2', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-hearing", "HEARING", '3', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-review", "REVIEW", '4', "NEEDS_REVIEW");
+    return fixture;
+  }
+
+  private static void fixtureScenario(
+      ObjectNode target, String fixtureId, String roomType, char hash, String terminalClass) {
+    target.put("fixtureId", fixtureId);
+    target.put("roomType", roomType);
+    target.put("inputSchemaVersion", "production-runtime-input.v1");
+    target.put("inputHash", String.valueOf(hash).repeat(64));
+    target.put("expectedTerminalClass", terminalClass);
+  }
+
+  private static String fixtureHash() {
+    return ContractJson.sha256Hex(syntheticFixture());
+  }
+
+  private static void database(
+      ObjectNode target, String cluster, String database, String principal) {
+    target.put("clusterIdentity", cluster);
+    target.put("databaseIdentity", database);
+    target.put("runtimePrincipalIdentity", principal);
+  }
+
+  private static void refreshHashes(ObjectNode payload) {
+    ObjectNode graph = (ObjectNode) payload.get("graphBinding");
+    graph.remove("bindingHash");
+    graph.put("bindingHash", ContractJson.sha256Hex(graph));
+    refreshManifestHash(payload);
+  }
+
+  private static void refreshManifestHash(ObjectNode payload) {
+    payload.remove("manifestHash");
+    payload.put("manifestHash", ContractJson.sha256Hex(payload));
+  }
+
+  private static String graphBindingHash() {
+    ObjectNode graph = MAPPER.createObjectNode();
+        graph.put("key", "all-rooms.production-runtime.v2");
+    graph.put("version", "graph-v9");
+    graph.put("checkpointSchemaVersion", "checkpoint-v9");
+    graph.put("codeBuildId", "graph-code-v9");
+    return ContractJson.sha256Hex(graph);
+  }
+
+  private static String digest(char value) {
+    return "sha256:" + String.valueOf(value).repeat(64);
+  }
+
+  private static ActivationRequest request(ActivationScope scope) {
+    return new ActivationRequest(scope, "tenant-e2e", RoomType.INTAKE, CASE_ID);
+  }
+
+  private static String sign(ObjectNode payload, KeyPair key, String keyId) throws Exception {
+    return sign(payload, key, keyId, "production-runtime-activation+jwt");
+  }
+
+  private static String sign(ObjectNode payload, KeyPair key, String keyId, String type)
+      throws Exception {
+    ObjectNode header = MAPPER.createObjectNode();
+    header.put("alg", "ES256");
+    header.put("kid", keyId);
+    header.put("typ", type);
+    return signRaw(ContractJson.canonicalize(header), ContractJson.canonicalize(payload), key);
+  }
+
+  private static String signRaw(byte[] payload, KeyPair key, String keyId) throws Exception {
+    ObjectNode header = MAPPER.createObjectNode();
+    header.put("alg", "ES256");
+    header.put("kid", keyId);
+    header.put("typ", "production-runtime-activation+jwt");
+    return signRaw(ContractJson.canonicalize(header), payload, key);
+  }
+
+  private static String signRaw(byte[] header, byte[] payload, KeyPair key) throws Exception {
+    String encodedHeader = BASE64_URL.encodeToString(header);
+    String encodedPayload = BASE64_URL.encodeToString(payload);
+    String signingInput = encodedHeader + "." + encodedPayload;
+    Signature signer = Signature.getInstance("SHA256withECDSAinP1363Format");
+    signer.initSign(key.getPrivate());
+    signer.update(signingInput.getBytes(StandardCharsets.US_ASCII));
+    return signingInput + "." + BASE64_URL.encodeToString(signer.sign());
+  }
+
+  private static KeyPair keyPair(String curve) throws Exception {
+    KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+    generator.initialize(new ECGenParameterSpec(curve));
+    return generator.generateKeyPair();
+  }
+
+  private static Clock fixedClock() {
+    return Clock.fixed(NOW, ZoneOffset.UTC);
+  }
+
+  private static final class RecordingReplayStore implements ProductionActivationReplayStore {
+
+    private final Map<String, Registration> byActivationId = new HashMap<>();
+    private final Map<String, Registration> byNonce = new HashMap<>();
+    private final Map<String, Long> generationHighWater = new HashMap<>();
+    private final AtomicInteger calls = new AtomicInteger();
+
+    @Override
+    public synchronized RegistrationResult registerOrAttach(Registration registration) {
+      calls.incrementAndGet();
+      Registration activation = byActivationId.get(registration.activationId());
+      Registration nonce = byNonce.get(registration.nonce());
+      if (registration.equals(activation) && registration.equals(nonce)) {
+        return RegistrationResult.ATTACHED_EXISTING;
+      }
+      Long highWater = generationHighWater.get(registration.environmentId());
+      if (highWater != null && registration.environmentGeneration() < highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_STALE;
+      }
+      if (highWater != null && registration.environmentGeneration() == highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_CONFLICT;
+      }
+      if (activation != null || nonce != null) {
+        return RegistrationResult.CONFLICT;
+      }
+      byActivationId.put(registration.activationId(), registration);
+      byNonce.put(registration.nonce(), registration);
+      generationHighWater.put(registration.environmentId(), registration.environmentGeneration());
+      return RegistrationResult.REGISTERED;
+    }
+
+    @Override
+    public synchronized RegistrationResult attachExistingForDrain(Registration registration) {
+      calls.incrementAndGet();
+      Registration activation = byActivationId.get(registration.activationId());
+      Registration nonce = byNonce.get(registration.nonce());
+      if (registration.equals(activation) && registration.equals(nonce)) {
+        return RegistrationResult.ATTACHED_EXISTING;
+      }
+      Long highWater = generationHighWater.get(registration.environmentId());
+      if (highWater != null && registration.environmentGeneration() < highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_STALE;
+      }
+      return RegistrationResult.ENVIRONMENT_GENERATION_CONFLICT;
+    }
+
+    int calls() {
+      return calls.get();
+    }
+  }
+
+  private static final class RecordingCaseLedger implements ProductionActivationCaseLedger {
+
+    private final Map<String, Reservation> globalCaseTombstones = new HashMap<>();
+    private final Map<String, Reservation> activationSlots = new HashMap<>();
+    private final int capacityLimit;
+
+    private RecordingCaseLedger() {
+      this(16);
+    }
+
+    private RecordingCaseLedger(int capacityLimit) {
+      this.capacityLimit = capacityLimit;
+    }
+
+    @Override
+    public synchronized ReservationResult apply(Action action, Reservation reservation) {
+      String slotKey = reservation.activationId() + ":" + reservation.slotNumber();
+      Reservation existingCase = globalCaseTombstones.get(reservation.caseId());
+      Reservation existingSlot = activationSlots.get(slotKey);
+      if (existingCase != null || existingSlot != null) {
+        if (reservation.equals(existingCase) && reservation.equals(existingSlot)) {
+          return ReservationResult.ALREADY_RESERVED_IDENTICALLY;
+        }
+        return existingCase != null
+            ? ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT
+            : ReservationResult.SLOT_CONFLICT;
+      }
+      if (action == Action.REQUIRE_EXISTING) {
+        return ReservationResult.NOT_RESERVED;
+      }
+      long activationCount =
+          activationSlots.values().stream()
+              .filter(existing -> existing.activationId().equals(reservation.activationId()))
+              .count();
+      if (activationCount >= Math.min(reservation.maxCases(), capacityLimit)) {
+        return ReservationResult.CAPACITY_EXHAUSTED;
+      }
+      activationSlots.put(slotKey, reservation);
+      globalCaseTombstones.put(reservation.caseId(), reservation);
+      return ReservationResult.RESERVED;
+    }
+  }
+
+  private static DrainCompletionProof drainProof(
+      long unresolved, long replicas, boolean sealed, Instant completedAt) {
+    return new DrainCompletionProof(
+        unresolved,
+        replicas,
+        sealed,
+        completedAt,
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64));
+  }
+
+  private static final class RecordingLifecycleStore implements ProductionActivationLifecycleStore {
+
+    private LifecycleState state = LifecycleState.REGISTERED;
+    private final Set<DrainAcceptedCommand> acceptedCommands = new java.util.HashSet<>();
+    private Instant drainedAt;
+
+    @Override
+    public synchronized LifecycleObservation refresh(
+        ActivationIdentity identity, Instant expiresAt, Instant now) {
+      if (state == LifecycleState.ACTIVE && !now.isBefore(expiresAt)) {
+        state = LifecycleState.DRAIN_ONLY;
+      }
+      if (state == LifecycleState.REGISTERED) {
+        state = now.isBefore(expiresAt) ? LifecycleState.ACTIVE : LifecycleState.DRAIN_ONLY;
+      }
+      return new LifecycleObservation(state, now);
+    }
+
+    @Override
+    public synchronized boolean hasAcceptedCommandBeforeExpiry(
+        ActivationIdentity identity, DrainAcceptedCommand command, Instant expiresAt) {
+      return command.admittedAt().isBefore(expiresAt) && acceptedCommands.contains(command);
+    }
+
+    @Override
+    public synchronized TransitionResult markDrained(
+        ActivationIdentity identity, DrainCompletionProof proof) {
+      if (state == LifecycleState.DRAINED) {
+        return TransitionResult.ALREADY_IN_TARGET_STATE;
+      }
+      if (state != LifecycleState.DRAIN_ONLY) {
+        return TransitionResult.REJECTED_WRONG_STATE;
+      }
+      if (proof.unresolvedAcceptedWork() != 0) {
+        return TransitionResult.REJECTED_UNRESOLVED_WORK;
+      }
+      if (proof.attachedReplicas() != 0) {
+        return TransitionResult.REJECTED_REPLICAS_ATTACHED;
+      }
+      if (!proof.evidenceSealed()) {
+        return TransitionResult.REJECTED_EVIDENCE_NOT_SEALED;
+      }
+      state = LifecycleState.DRAINED;
+      drainedAt = proof.completedAt();
+      return TransitionResult.TRANSITIONED;
+    }
+
+    @Override
+    public synchronized TransitionResult revokeTerminal(
+        ActivationIdentity identity, Instant revokedAt) {
+      if (state == LifecycleState.REVOKED_TERMINAL) {
+        return TransitionResult.ALREADY_IN_TARGET_STATE;
+      }
+      if (state != LifecycleState.DRAINED) {
+        return TransitionResult.REJECTED_WRONG_STATE;
+      }
+      if (drainedAt == null || !revokedAt.isAfter(drainedAt)) {
+        return TransitionResult.REJECTED_TIMESTAMP_ORDER;
+      }
+      state = LifecycleState.REVOKED_TERMINAL;
+      return TransitionResult.TRANSITIONED;
+    }
+
+    void accept(DrainAcceptedCommand command) {
+      acceptedCommands.add(command);
+    }
+  }
+
+  private static final class MutableClock extends Clock {
+
+    private Instant current;
+
+    private MutableClock(Instant current) {
+      this.current = current;
+    }
+
+    void advance(Duration duration) {
+      current = current.plus(duration);
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      if (!ZoneOffset.UTC.equals(zone)) {
+        throw new IllegalArgumentException("test clock is UTC only");
+      }
+      return this;
+    }
+
+    @Override
+    public Instant instant() {
+      return current;
+    }
+  }
+
+  @Test
+  void permitsThirtyDayActivationButRejectsAnyLongerLifetime() {
+    assertThat(ProductionActivationManifestVerifier.isPermittedLifetime(Duration.ofDays(30)))
+        .isTrue();
+    assertThat(
+            ProductionActivationManifestVerifier.isPermittedLifetime(
+                Duration.ofDays(30).plusSeconds(1)))
+        .isFalse();
+  }
+}

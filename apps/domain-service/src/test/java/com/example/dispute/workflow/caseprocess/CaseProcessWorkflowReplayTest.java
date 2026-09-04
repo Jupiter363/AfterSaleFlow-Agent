@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessDispatcher;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomCaseProcessDispatcher;
 import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;

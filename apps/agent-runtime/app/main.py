@@ -277,12 +277,12 @@ def create_app(
             resolved_graph_runtime.reconciliation_endpoint_dependencies()
         )
     )
-    if resolved.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
-        from app.api.target_e2e_lifecycle import create_target_e2e_lifecycle_router
+    if resolved.graph_gateway_mode == "PRODUCTION":
+        from app.api.production_runtime_lifecycle import create_production_runtime_lifecycle_router
 
         app.include_router(
-            create_target_e2e_lifecycle_router(
-                resolved_graph_runtime.target_e2e_lifecycle_endpoint_dependencies()
+            create_production_runtime_lifecycle_router(
+                resolved_graph_runtime.production_runtime_lifecycle_endpoint_dependencies()
             )
         )
     app.include_router(create_graph_readiness_router(resolved_graph_runtime))

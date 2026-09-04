@@ -12,9 +12,9 @@ import com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionRec
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeSlaEscalationReceipt;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
-import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities;
-import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities.CompletionRequest;
-import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities.CompletionResult;
+import com.example.dispute.workflow.runtime.rooms.outcome.TargetOutcomeCompletionActivities;
+import com.example.dispute.workflow.runtime.rooms.outcome.TargetOutcomeCompletionActivities.CompletionRequest;
+import com.example.dispute.workflow.runtime.rooms.outcome.TargetOutcomeCompletionActivities.CompletionResult;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;

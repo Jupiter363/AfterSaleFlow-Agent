@@ -32,7 +32,7 @@ public final class IntakeAgentRunDomainResultCommitter
         this.requestResolver = Objects.requireNonNull(requestResolver, "requestResolver");
         this.finalizer = Objects.requireNonNull(finalizer, "finalizer");
         if (!IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY.equals(expectedGraphKey)
-                && !IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+                && !IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY.equals(expectedGraphKey)) {
             throw new IllegalArgumentException("expectedGraphKey is not an allowed Intake graph");
         }
         this.expectedGraphKey = expectedGraphKey;

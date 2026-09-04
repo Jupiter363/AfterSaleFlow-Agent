@@ -98,7 +98,7 @@ def test_runtime_pool_split_rejects_a_budget_without_three_isolated_lanes() -> N
         checkpoint._runtime_pool_configs(GraphPoolConfig(min_size=1, max_size=2))
 
 
-def test_target_e2e_lifecycle_routes_to_control_pool() -> None:
+def test_production_runtime_lifecycle_routes_to_control_pool() -> None:
     checkpoint_pool = object()
     control_pool = object()
     runtime = GraphApplicationRuntime(
@@ -116,7 +116,7 @@ def test_target_e2e_lifecycle_routes_to_control_pool() -> None:
         admission_gate=object(),
         execution_verifier=object(),
         reconciliation_verifier=object(),
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
     )
 
-    assert runtime.target_e2e_lifecycle_pool is control_pool
+    assert runtime.production_runtime_lifecycle_pool is control_pool

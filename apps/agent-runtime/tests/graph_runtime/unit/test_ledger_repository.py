@@ -273,7 +273,7 @@ async def test_register_inserts_command_then_nonce_on_one_connection() -> None:
 async def test_candidate_registration_locks_lifecycle_before_admission() -> None:
     binding = replace(
         _binding(),
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=f"p9act.v1.{'a' * 32}",
         room_fencing_token=11,
         command_hash="b" * 64,
@@ -382,7 +382,7 @@ async def test_existing_only_nonce_consumption_has_no_side_effect_for_missing_co
 async def test_candidate_reconcile_requires_read_only_pre_cutoff_jws_admission_proof() -> None:
     binding = replace(
         _binding(),
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=f"p9act.v1.{'a' * 32}",
         room_fencing_token=11,
         command_hash="b" * 64,
@@ -412,7 +412,7 @@ async def test_candidate_reconcile_requires_read_only_pre_cutoff_jws_admission_p
 async def test_candidate_reconcile_uses_historical_admission_for_fresh_credential() -> None:
     binding = replace(
         _binding(),
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=f"p9act.v1.{'a' * 32}",
         room_fencing_token=11,
         command_hash="b" * 64,

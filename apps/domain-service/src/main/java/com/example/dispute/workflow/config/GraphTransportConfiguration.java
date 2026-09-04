@@ -26,7 +26,7 @@ import org.springframework.core.env.Profiles;
 })
 @ConditionalOnExpression(
         "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'SHADOW' || "
-                + "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'TARGET_E2E_CANDIDATE'")
+                + "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'PRODUCTION'")
 public class GraphTransportConfiguration {
 
     @Bean(destroyMethod = "close")

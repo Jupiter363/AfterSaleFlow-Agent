@@ -88,13 +88,13 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetEvidenceOpeningIngress;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnResultV2;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetEvidenceOpeningIngress;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandAdmission;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterial;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceTurnResultV2;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1960,7 +1960,7 @@ class EvidenceAgentTurnServiceTest {
                         "TRACE_MERCHANT_COMMITTED");
         committedMerchantOpening.attachAgentRun(logicalRuns.get(merchantBaseCommandId));
         merchantCommand.markApplied(
-                "urn:target-e2e:evidence-formal-message:"
+                "urn:production-runtime:evidence-formal-message:"
                         + committedMerchantOpening.getId(),
                 "3".repeat(64),
                 OffsetDateTime.ofInstant(CLOCK.instant().plusSeconds(20), ZoneOffset.UTC));

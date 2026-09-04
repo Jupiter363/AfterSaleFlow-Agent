@@ -1,5 +1,0 @@
-{
-  "schema_version": "target-e2e-room-proposal-source.v2",
-  "room_type": "HEARING",
-  "proposal": {"schema_version": "target-e2e-hearing-proposal.v1", "proposal_id": "proposal-hearing-001", "command_id": "command-hearing-001", "logical_run_id": "run-hearing-001", "attempt_id": "attempt-hearing-001", "payload_schema_version": "hearing-terminal-proposal.v1", "payload_ref": "urn:target-e2e:proposal:hearing:001", "payload_hash": "3333333333333333333333333333333333333333333333333333333333333333", "terminal_class": "COMPLETED", "formal_authority": false}
-}

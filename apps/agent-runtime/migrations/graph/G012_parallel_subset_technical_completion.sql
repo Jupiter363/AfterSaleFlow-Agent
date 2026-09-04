@@ -204,14 +204,14 @@ as $function$
          where command.thread_id = target_thread_id
            and command.command_id = target_command_id
            and command.request_hash = target_request_hash
-           and command.output_schema_version = 'target-e2e-room-proposal-source.v2'
+           and command.output_schema_version = 'production-runtime-room-proposal-source.v2'
            and command.request_json ->> 'room_type' = 'INTAKE'
            and command.request_json ->> 'room_id' is not null
            and jsonb_typeof(command.request_json -> 'event_ref') = 'object'
            and command.request_json #>> '{invocation_context,agent_profile_id}'
                = 'dispute-intake-officer.parallel-frames.v1'
            and command.request_json #>> '{invocation_context,output_schema_version}'
-               = 'target-e2e-room-proposal-source.v2'
+               = 'production-runtime-room-proposal-source.v2'
            and command.request_json #>> '{actor_scope,actor_role}' in ('USER', 'MERCHANT')
            and command.request_json #>> '{actor_scope,audience}'
                = command.request_json #>> '{actor_scope,actor_role}'

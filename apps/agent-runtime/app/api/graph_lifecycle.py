@@ -22,15 +22,15 @@ from app.api.graph_commands import (
     TransportIdentityResolver,
     TrustedReconciliationThreadIdentityResolver,
     TrustedThreadIdentityResolver,
-    TargetE2EInvocationEnvelopeVerifierPort,
+    ProductionInvocationEnvelopeVerifierPort,
 )
-from app.api.target_e2e_lifecycle import (
-    TargetE2ELifecycleEndpointDependencies,
+from app.api.production_runtime_lifecycle import (
+    ProductionLifecycleEndpointDependencies,
 )
 from app.api.graph_reconciliation_service import (
     GatewayBackedGraphReconciliationService,
     GraphReconciliationService,
-    TargetE2EReconciliationArtifacts,
+    ProductionReconciliationArtifacts,
 )
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
@@ -64,31 +64,31 @@ from app.graph_runtime.postgres_bulkhead import (
 )
 from app.graph_runtime.readiness import GraphPersistenceReadinessProbe
 from app.graph_runtime.registry import PostgresGraphVersionRegistry
-from app.graph_runtime.target_e2e import (
-    PostgresTargetE2EActivationRepository,
-    TargetE2EGraphCommandEnvelope,
-    TargetE2EInputAuthorizer,
-    TargetE2ERoomProposalSource,
-    TargetE2EThreadIdentityResolver,
-    TargetE2EInvocationVerifier,
-    TargetE2ERuntimeAuthority,
-    VerifiedTargetE2EInvocation,
+from app.graph_runtime.production_runtime import (
+    PostgresProductionActivationRepository,
+    ProductionGraphCommandEnvelope,
+    ProductionInputAuthorizer,
+    ProductionRoomProposalSource,
+    ProductionThreadIdentityResolver,
+    ProductionInvocationVerifier,
+    ProductionRuntimeAuthority,
+    VerifiedProductionInvocation,
 )
-from app.graph_runtime.target_e2e_lifecycle import (
-    FilesystemTargetE2ECheckpointBarrierControl,
-    PostgresTargetE2ELifecycleRepository,
-    TargetE2ECheckpointGatewayBarrier,
-    TargetE2ECheckpointRecoveryBarrier,
-    TargetE2ELifecycleBinding,
-    TargetE2ELifecycleReceiptVerifier,
-    TargetE2ELifecycleReconciler,
-    TargetE2ELifecycleReconciliation,
-    VerifiedTargetE2ELifecycleReceipt,
+from app.graph_runtime.production_runtime_lifecycle import (
+    FilesystemProductionCheckpointBarrierControl,
+    PostgresProductionLifecycleRepository,
+    ProductionCheckpointGatewayBarrier,
+    ProductionCheckpointRecoveryBarrier,
+    ProductionLifecycleBinding,
+    ProductionLifecycleReceiptVerifier,
+    ProductionLifecycleReconciler,
+    ProductionLifecycleReconciliation,
+    VerifiedProductionLifecycleReceipt,
 )
 from app.harness.prompt_composer import (
     INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES,
     PromptRepository,
-    TARGET_E2E_PROMPT_BUNDLE_NODES,
+    PRODUCTION_RUNTIME_PROMPT_BUNDLE_NODES,
 )
 from app.security.graph_runtime import (
     GraphSecurityRuntime,
@@ -161,7 +161,7 @@ def _shadow_bulkhead_config() -> PostgresBulkheadConfig:
     )
 
 
-def _require_target_e2e_prompt_resources(
+def _require_production_runtime_prompt_resources(
     configured_bindings: Iterable[Any],
 ) -> None:
     """Fail startup before activation registration when its Prompt bundle is incomplete."""
@@ -172,7 +172,7 @@ def _require_target_e2e_prompt_resources(
         observed = True
         prompt_repository.require_prompt_bundle(
             configured.prompt_version,
-            required_node_names=TARGET_E2E_PROMPT_BUNDLE_NODES,
+            required_node_names=PRODUCTION_RUNTIME_PROMPT_BUNDLE_NODES,
         )
     for prompt_profile_id, required_nodes in INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES.items():
         prompt_repository.require_prompt_bundle(
@@ -180,7 +180,7 @@ def _require_target_e2e_prompt_resources(
             required_node_names=tuple(sorted(required_nodes)),
         )
     if not observed:
-        raise ValueError("target-E2E Prompt readiness requires an exact binding")
+        raise ValueError("production-runtime Prompt readiness requires an exact binding")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,13 +256,13 @@ class GraphRuntimeInstance(Protocol):
     stream_service: GraphCommandStreamService
     parallel_intake_stream_service: ParallelIntakeFrameStreamService | None
     reconciliation_service: GraphReconciliationService
-    target_e2e_verifier: TargetE2EInvocationEnvelopeVerifierPort | None
+    production_runtime_verifier: ProductionInvocationEnvelopeVerifierPort | None
 
     @property
-    def target_e2e_lifecycle_key_resolver(self) -> VerificationKeyResolver: ...
+    def production_runtime_lifecycle_key_resolver(self) -> VerificationKeyResolver: ...
 
     @property
-    def target_e2e_lifecycle_pool(self) -> Any: ...
+    def production_runtime_lifecycle_pool(self) -> Any: ...
 
     @property
     def ready(self) -> bool: ...
@@ -301,7 +301,7 @@ class GraphApplicationRuntime:
         execution_verifier: InvocationEnvelopeVerifier,
         reconciliation_verifier: ReconciliationEnvelopeVerifier,
         parallel_intake_stream_service: ParallelIntakeFrameStreamService | None = None,
-        target_e2e_verifier: TargetE2EInvocationVerifier | None = None,
+        production_runtime_verifier: ProductionInvocationVerifier | None = None,
         mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
         resource_closer: Callable[[], Awaitable[None]] | None = None,
         intake_infrastructure_preparer: Callable[[], Awaitable[None]] | None = None,
@@ -317,7 +317,7 @@ class GraphApplicationRuntime:
         self._admission_gate = admission_gate
         self.execution_verifier = execution_verifier
         self.reconciliation_verifier = reconciliation_verifier
-        self.target_e2e_verifier = target_e2e_verifier
+        self.production_runtime_verifier = production_runtime_verifier
         self._mode = mode
         self._resource_closer = resource_closer
         self._intake_infrastructure_preparer = intake_infrastructure_preparer
@@ -339,11 +339,11 @@ class GraphApplicationRuntime:
             raise ValueError("Graph application runtime opens only in an active mode")
         if settings.graph_database_dsn is None or settings.graph_jwks_url is None:
             raise ValueError("active Graph dependencies are incomplete")
-        if bindings is None and mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if bindings is None and mode is not GraphGatewayMode.PRODUCTION:
             raise ValueError("active Graph runtime requires trusted runtime bindings")
-        if bindings is not None and mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if bindings is not None and mode is GraphGatewayMode.PRODUCTION:
             raise ValueError(
-                "target-E2E runtime bindings must be assembled after Graph security readiness"
+                "production-runtime runtime bindings must be assembled after Graph security readiness"
             )
         if bindings is not None and not callable(bindings.executor_registry_factory):
             raise ValueError("active Graph runtime requires an executor registry factory")
@@ -402,35 +402,35 @@ class GraphApplicationRuntime:
             # opening transaction; the real binding is assembled below only
             # after the security runtime has proven ready.
             input_authorizer = (
-                TargetE2EInputAuthorizer()
-                if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+                ProductionInputAuthorizer()
+                if mode is GraphGatewayMode.PRODUCTION
                 else bindings.input_authorizer
             )
             terminal_result_barrier = None
-            if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-                lifecycle_binding = _build_target_e2e_lifecycle_binding(settings)
+            if mode is GraphGatewayMode.PRODUCTION:
+                lifecycle_binding = _build_production_runtime_lifecycle_binding(settings)
                 barrier_control = None
-                if settings.graph_target_e2e_checkpoint_barrier_enabled:
-                    barrier_directory = settings.graph_target_e2e_checkpoint_barrier_directory
+                if settings.graph_production_runtime_checkpoint_barrier_enabled:
+                    barrier_directory = settings.graph_production_runtime_checkpoint_barrier_directory
                     if barrier_directory is None:
                         raise ValueError(
                             "enabled checkpoint recovery barrier has no control directory"
                         )
-                    barrier_control = FilesystemTargetE2ECheckpointBarrierControl(
+                    barrier_control = FilesystemProductionCheckpointBarrierControl(
                         barrier_directory,
                         poll_interval_seconds=(
-                            settings.graph_target_e2e_checkpoint_barrier_poll_interval_seconds
+                            settings.graph_production_runtime_checkpoint_barrier_poll_interval_seconds
                         ),
                     )
-                recovery_barrier = TargetE2ECheckpointRecoveryBarrier(
+                recovery_barrier = ProductionCheckpointRecoveryBarrier(
                     expected_binding=lifecycle_binding,
-                    enabled=settings.graph_target_e2e_checkpoint_barrier_enabled,
-                    isolated_synthetic_environment=settings.graph_target_e2e_isolated,
+                    enabled=settings.graph_production_runtime_checkpoint_barrier_enabled,
+                    isolated_synthetic_environment=settings.graph_production_runtime_isolated,
                     maximum_wait_seconds=(
-                        settings.graph_target_e2e_checkpoint_barrier_maximum_wait_seconds
+                        settings.graph_production_runtime_checkpoint_barrier_maximum_wait_seconds
                     ),
                     durability_timeout_seconds=(
-                        settings.graph_target_e2e_checkpoint_barrier_durability_timeout_seconds
+                        settings.graph_production_runtime_checkpoint_barrier_durability_timeout_seconds
                     ),
                     arming_policy=(
                         barrier_control.is_armed if barrier_control is not None else None
@@ -439,7 +439,7 @@ class GraphApplicationRuntime:
                         barrier_control.wait_for_release if barrier_control is not None else None
                     ),
                 )
-                terminal_result_barrier = TargetE2ECheckpointGatewayBarrier(
+                terminal_result_barrier = ProductionCheckpointGatewayBarrier(
                     pool=checkpoint_runtime.pool,
                     expected_binding=lifecycle_binding,
                     barrier=recovery_barrier,
@@ -466,23 +466,23 @@ class GraphApplicationRuntime:
                 refresh_interval_seconds=settings.graph_jwks_refresh_seconds,
                 referenced_key_ids=gateway.referenced_verification_key_ids,
             )
-            target_e2e_verifier: TargetE2EInvocationVerifier | None = None
-            if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-                context = settings.graph_target_e2e_runtime_context
-                if context is None or not settings.graph_target_e2e_bindings:
-                    raise ValueError("target-E2E runtime projection is incomplete")
-                _require_target_e2e_prompt_resources(
-                    settings.graph_target_e2e_bindings
+            production_runtime_verifier: ProductionInvocationVerifier | None = None
+            if mode is GraphGatewayMode.PRODUCTION:
+                context = settings.graph_production_runtime_context
+                if context is None or not settings.graph_production_runtime_bindings:
+                    raise ValueError("production-runtime runtime projection is incomplete")
+                _require_production_runtime_prompt_resources(
+                    settings.graph_production_runtime_bindings
                 )
-                authority = TargetE2ERuntimeAuthority.from_context(
+                authority = ProductionRuntimeAuthority.from_context(
                     context,
-                    settings.graph_target_e2e_bindings,
+                    settings.graph_production_runtime_bindings,
                 )
                 async with checkpoint_runtime.pool.connection(
                     timeout=settings.graph_pool_acquire_timeout_seconds
                 ) as connection:
                     async with connection.transaction():
-                        for configured in settings.graph_target_e2e_bindings:
+                        for configured in settings.graph_production_runtime_bindings:
                             registered_binding = await PostgresGraphVersionRegistry().load(
                                 connection,
                                 graph_key=configured.graph_key,
@@ -496,19 +496,19 @@ class GraphApplicationRuntime:
                                 != configured.code_build_id
                             ):
                                 raise ValueError(
-                                    "target-E2E executor differs from candidate registry"
+                                    "production-runtime executor differs from candidate registry"
                                 )
-                        await PostgresTargetE2EActivationRepository().register(
+                        await PostgresProductionActivationRepository().register(
                             connection,
                             authority,
                         )
-                target_e2e_verifier = TargetE2EInvocationVerifier(
+                production_runtime_verifier = ProductionInvocationVerifier(
                     key_resolver=security_runtime.resolver,
                     authority=authority,
                 )
                 if not security_runtime.readiness().ready:
-                    raise RuntimeError("target-E2E Graph security runtime is not ready")
-                bindings = _build_target_e2e_runtime_bindings(
+                    raise RuntimeError("production-runtime Graph security runtime is not ready")
+                bindings = _build_production_runtime_bindings(
                     settings=settings,
                     security_runtime=security_runtime,
                 )
@@ -566,7 +566,7 @@ class GraphApplicationRuntime:
                 reconciliation_verifier=ReconciliationEnvelopeVerifier(
                     key_resolver=security_runtime.resolver,
                 ),
-                target_e2e_verifier=target_e2e_verifier,
+                production_runtime_verifier=production_runtime_verifier,
                 mode=mode,
                 resource_closer=bindings.resource_closer,
                 intake_infrastructure_preparer=bindings.intake_infrastructure_preparer,
@@ -604,15 +604,15 @@ class GraphApplicationRuntime:
             return False
 
     @property
-    def target_e2e_lifecycle_key_resolver(self) -> VerificationKeyResolver:
-        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+    def production_runtime_lifecycle_key_resolver(self) -> VerificationKeyResolver:
+        if self._mode is not GraphGatewayMode.PRODUCTION:
+            raise GraphGatewayDisabledError("PRODUCTION_RUNTIME_LIFECYCLE_DISABLED")
         return self._security_runtime.resolver
 
     @property
-    def target_e2e_lifecycle_pool(self) -> Any:
-        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+    def production_runtime_lifecycle_pool(self) -> Any:
+        if self._mode is not GraphGatewayMode.PRODUCTION:
+            raise GraphGatewayDisabledError("PRODUCTION_RUNTIME_LIFECYCLE_DISABLED")
         return getattr(self._checkpoint_runtime, "control_pool", self._checkpoint_runtime.pool)
 
     async def check_readiness(self) -> GraphRuntimeReadiness:
@@ -682,7 +682,7 @@ class GraphApplicationRuntime:
     async def prepare_intake_infrastructure(self) -> None:
         preparer = self._intake_infrastructure_preparer
         if (
-            self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            self._mode is not GraphGatewayMode.PRODUCTION
             or preparer is None
             or not self.ready
         ):
@@ -728,7 +728,7 @@ class GraphApplicationRuntime:
             return self._drained
 
 
-def _build_target_e2e_runtime_bindings(
+def _build_production_runtime_bindings(
     *,
     settings: Settings,
     security_runtime: GraphSecurityRuntime,
@@ -741,40 +741,40 @@ def _build_target_e2e_runtime_bindings(
     """
 
     if type(security_runtime) is not GraphSecurityRuntime or not security_runtime.readiness().ready:
-        raise RuntimeError("target-E2E Graph security runtime is not ready")
-    from app.graph_runtime.executor import TargetE2ESpecializedRoomProviderFactory
+        raise RuntimeError("production-runtime Graph security runtime is not ready")
+    from app.graph_runtime.executor import ProductionSpecializedRoomProviderFactory
     from app.graph_runtime.production_bindings import build_graph_runtime_bindings
-    from app.graph_runtime.target_e2e_room_exchange import JavaTargetE2ERoomExchange
+    from app.graph_runtime.production_runtime_room_exchange import JavaProductionRoomExchange
 
-    room_exchange = JavaTargetE2ERoomExchange(
+    room_exchange = JavaProductionRoomExchange(
         java_api_service_url=settings.java_api_service_url,
         java_service_secret=settings.java_service_secret,
     )
-    provider_factory = TargetE2ESpecializedRoomProviderFactory(
+    provider_factory = ProductionSpecializedRoomProviderFactory(
         security_runtime=security_runtime,
         room_exchange=room_exchange,
     )
     return build_graph_runtime_bindings(
         settings,
-        target_e2e_specialized_provider_factory=provider_factory,
-        target_e2e_room_exchange=room_exchange,
+        production_runtime_specialized_provider_factory=provider_factory,
+        production_runtime_room_exchange=room_exchange,
     )
 
 
-def _build_target_e2e_lifecycle_binding(
+def _build_production_runtime_lifecycle_binding(
     settings: Settings,
-) -> TargetE2ELifecycleBinding:
-    if settings.graph_gateway_mode != "TARGET_E2E_CANDIDATE":
-        raise ValueError("target-E2E lifecycle binding requires candidate mode")
-    context = settings.graph_target_e2e_runtime_context
-    manifest_hash = settings.target_e2e_activation_manifest_hash
+) -> ProductionLifecycleBinding:
+    if settings.graph_gateway_mode != "PRODUCTION":
+        raise ValueError("production-runtime lifecycle binding requires candidate mode")
+    context = settings.graph_production_runtime_context
+    manifest_hash = settings.production_runtime_activation_manifest_hash
     if context is None or manifest_hash is None:
-        raise ValueError("target-E2E lifecycle deployment binding is incomplete")
-    authority = TargetE2ERuntimeAuthority.from_context(
+        raise ValueError("production-runtime lifecycle deployment binding is incomplete")
+    authority = ProductionRuntimeAuthority.from_context(
         context,
-        settings.graph_target_e2e_bindings,
+        settings.graph_production_runtime_bindings,
     )
-    return TargetE2ELifecycleBinding(
+    return ProductionLifecycleBinding(
         activation_id=context.activationId,
         environment_id=context.environmentId,
         environment_generation=context.environmentGeneration,
@@ -796,9 +796,9 @@ class GraphRuntimeHandle:
     ) -> None:
         self._settings = settings
         self._mode = GraphGatewayMode(settings.graph_gateway_mode)
-        if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE and bindings is not None:
+        if self._mode is GraphGatewayMode.PRODUCTION and bindings is not None:
             raise ValueError(
-                "target-E2E runtime bindings must be assembled inside the Graph lifecycle"
+                "production-runtime runtime bindings must be assembled inside the Graph lifecycle"
             )
         self._bindings = bindings
         self._runtime_factory = runtime_factory or GraphApplicationRuntime.open
@@ -807,23 +807,23 @@ class GraphRuntimeHandle:
         )
         self._runtime: GraphRuntimeInstance | None = None
         self._execution_verifier = _RuntimeExecutionVerifier(self)
-        self._target_e2e_verifier = _RuntimeTargetE2EVerifier(self)
+        self._production_runtime_verifier = _RuntimeProductionVerifier(self)
         self._reconciliation_verifier = _RuntimeReconciliationVerifier(self)
         self._stream_service = _RuntimeStreamService(self)
         self._parallel_intake_stream_service = _RuntimeParallelIntakeStreamService(self)
         self._reconciliation_service = _RuntimeReconciliationService(self)
-        self._target_e2e_lifecycle_binding = (
-            _build_target_e2e_lifecycle_binding(settings)
-            if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+        self._production_runtime_lifecycle_binding = (
+            _build_production_runtime_lifecycle_binding(settings)
+            if self._mode is GraphGatewayMode.PRODUCTION
             else None
         )
-        self._target_e2e_lifecycle_verifier = _RuntimeTargetE2ELifecycleVerifier(self)
-        self._target_e2e_lifecycle_reconciler = _RuntimeTargetE2ELifecycleReconciler(self)
+        self._production_runtime_lifecycle_verifier = _RuntimeProductionLifecycleVerifier(self)
+        self._production_runtime_lifecycle_reconciler = _RuntimeProductionLifecycleReconciler(self)
         self._thread_resolver = (
             bindings.thread_identity_resolver
             if bindings is not None
-            else TargetE2EThreadIdentityResolver()
-            if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+            else ProductionThreadIdentityResolver()
+            if self._mode is GraphGatewayMode.PRODUCTION
             else _FailClosedThreadResolver()
         )
 
@@ -847,10 +847,10 @@ class GraphRuntimeHandle:
             thread_identity_resolver=self._thread_resolver,
             stream_service=self._stream_service,
             ready=lambda: self.ready,
-            target_e2e_envelope_verifier=self._target_e2e_verifier,
+            production_runtime_envelope_verifier=self._production_runtime_verifier,
             parallel_intake_stream_service=(
                 self._parallel_intake_stream_service
-                if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+                if self._mode is GraphGatewayMode.PRODUCTION
                 else None
             ),
         )
@@ -869,27 +869,27 @@ class GraphRuntimeHandle:
             ),
             reconciliation_service=self._reconciliation_service,
             ready=lambda: self.ready,
-            target_e2e_envelope_verifier=self._target_e2e_verifier,
-            target_e2e_thread_identity_resolver=cast(
+            production_runtime_envelope_verifier=self._production_runtime_verifier,
+            production_runtime_thread_identity_resolver=cast(
                 TrustedThreadIdentityResolver,
                 self._thread_resolver,
             ),
         )
 
-    def target_e2e_lifecycle_endpoint_dependencies(
+    def production_runtime_lifecycle_endpoint_dependencies(
         self,
-    ) -> TargetE2ELifecycleEndpointDependencies:
+    ) -> ProductionLifecycleEndpointDependencies:
         if (
-            self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE
-            or self._target_e2e_lifecycle_binding is None
+            self._mode is not GraphGatewayMode.PRODUCTION
+            or self._production_runtime_lifecycle_binding is None
         ):
-            raise ValueError("target-E2E lifecycle route is not available in this mode")
-        return TargetE2ELifecycleEndpointDependencies(
+            raise ValueError("production-runtime lifecycle route is not available in this mode")
+        return ProductionLifecycleEndpointDependencies(
             mode=self._mode.value,
             ready=lambda: self.ready,
             transport_identity_resolver=self._transport_identity_resolver,
-            receipt_verifier=self._target_e2e_lifecycle_verifier,
-            reconciler=self._target_e2e_lifecycle_reconciler,
+            receipt_verifier=self._production_runtime_lifecycle_verifier,
+            reconciler=self._production_runtime_lifecycle_reconciler,
         )
 
     @asynccontextmanager
@@ -899,7 +899,7 @@ class GraphRuntimeHandle:
             return
         bindings = self._bindings
         if bindings is None:
-            if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if self._mode is not GraphGatewayMode.PRODUCTION:
                 raise RuntimeError("active Graph mode requires trusted runtime bindings")
         runtime = await self._runtime_factory(self._settings, bindings)
         try:
@@ -960,21 +960,21 @@ class GraphRuntimeHandle:
         return runtime
 
     async def prepare_intake_infrastructure(self) -> None:
-        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if self._mode is not GraphGatewayMode.PRODUCTION:
             raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
         runtime = self.require_runtime()
         await runtime.prepare_intake_infrastructure()
         if not self.ready:
             raise GraphGatewayDisabledError("GRAPH_INTAKE_PREPARATION_UNAVAILABLE")
 
-    def require_target_e2e_lifecycle_binding(self) -> TargetE2ELifecycleBinding:
-        binding = self._target_e2e_lifecycle_binding
-        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE or binding is None:
-            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+    def require_production_runtime_lifecycle_binding(self) -> ProductionLifecycleBinding:
+        binding = self._production_runtime_lifecycle_binding
+        if self._mode is not GraphGatewayMode.PRODUCTION or binding is None:
+            raise GraphGatewayDisabledError("PRODUCTION_RUNTIME_LIFECYCLE_DISABLED")
         return binding
 
 
-class _RuntimeTargetE2ELifecycleVerifier:
+class _RuntimeProductionLifecycleVerifier:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
 
@@ -983,29 +983,29 @@ class _RuntimeTargetE2ELifecycleVerifier:
         *,
         token: str,
         transport_identity: TransportIdentity,
-    ) -> VerifiedTargetE2ELifecycleReceipt:
+    ) -> VerifiedProductionLifecycleReceipt:
         runtime = self._handle.require_runtime()
-        verifier = TargetE2ELifecycleReceiptVerifier(
-            key_resolver=runtime.target_e2e_lifecycle_key_resolver,
-            expected_binding=self._handle.require_target_e2e_lifecycle_binding(),
+        verifier = ProductionLifecycleReceiptVerifier(
+            key_resolver=runtime.production_runtime_lifecycle_key_resolver,
+            expected_binding=self._handle.require_production_runtime_lifecycle_binding(),
         )
         return verifier.verify(token=token, transport_identity=transport_identity)
 
 
-class _RuntimeTargetE2ELifecycleReconciler:
+class _RuntimeProductionLifecycleReconciler:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
-        self._repository = PostgresTargetE2ELifecycleRepository()
+        self._repository = PostgresProductionLifecycleRepository()
 
     async def reconcile(
         self,
-        verified: VerifiedTargetE2ELifecycleReceipt,
-    ) -> TargetE2ELifecycleReconciliation:
+        verified: VerifiedProductionLifecycleReceipt,
+    ) -> ProductionLifecycleReconciliation:
         runtime = self._handle.require_runtime()
-        reconciler = TargetE2ELifecycleReconciler(
-            pool=runtime.target_e2e_lifecycle_pool,
+        reconciler = ProductionLifecycleReconciler(
+            pool=runtime.production_runtime_lifecycle_pool,
             repository=self._repository,
-            expected_binding=self._handle.require_target_e2e_lifecycle_binding(),
+            expected_binding=self._handle.require_production_runtime_lifecycle_binding(),
         )
         return await reconciler.reconcile(verified)
 
@@ -1031,7 +1031,7 @@ class _RuntimeExecutionVerifier:
         return verified
 
 
-class _RuntimeTargetE2EVerifier:
+class _RuntimeProductionVerifier:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
 
@@ -1039,34 +1039,34 @@ class _RuntimeTargetE2EVerifier:
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
-    ) -> VerifiedTargetE2EInvocation:
-        verifier = self._handle.require_runtime().target_e2e_verifier
+    ) -> VerifiedProductionInvocation:
+        verifier = self._handle.require_runtime().production_runtime_verifier
         if verifier is None:
-            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED")
         verified = verifier.verify_envelope(
             token=token,
             envelope=envelope,
             transport_identity=transport_identity,
         )
-        if not isinstance(verified, VerifiedTargetE2EInvocation):
-            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        if not isinstance(verified, VerifiedProductionInvocation):
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         return verified
 
     def verify_parallel_envelope(
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
         phase: str,
         admission_receipt_sha256: str | None,
         failure_code: str | None = None,
-    ) -> VerifiedTargetE2EInvocation:
-        verifier = self._handle.require_runtime().target_e2e_verifier
+    ) -> VerifiedProductionInvocation:
+        verifier = self._handle.require_runtime().production_runtime_verifier
         if verifier is None:
-            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED")
         verified = verifier.verify_parallel_envelope(
             token=token,
             envelope=envelope,
@@ -1075,27 +1075,27 @@ class _RuntimeTargetE2EVerifier:
             admission_receipt_sha256=admission_receipt_sha256,
             failure_code=failure_code,
         )
-        if not isinstance(verified, VerifiedTargetE2EInvocation):
-            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        if not isinstance(verified, VerifiedProductionInvocation):
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         return verified
 
     def verify_envelope_for_reconciliation(
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
-    ) -> VerifiedTargetE2EInvocation:
-        verifier = self._handle.require_runtime().target_e2e_verifier
+    ) -> VerifiedProductionInvocation:
+        verifier = self._handle.require_runtime().production_runtime_verifier
         if verifier is None:
-            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED")
         verified = verifier.verify_envelope_for_reconciliation(
             token=token,
             envelope=envelope,
             transport_identity=transport_identity,
         )
-        if not isinstance(verified, VerifiedTargetE2EInvocation):
-            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        if not isinstance(verified, VerifiedProductionInvocation):
+            raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         return verified
 
 
@@ -1146,7 +1146,7 @@ class _RuntimeParallelIntakeStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ParallelFrameStreamAuthority:
         service = self._handle.require_runtime().parallel_intake_stream_service
@@ -1162,7 +1162,7 @@ class _RuntimeParallelIntakeStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
@@ -1180,7 +1180,7 @@ class _RuntimeParallelIntakeStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
         failure_code: str,
@@ -1214,29 +1214,29 @@ class _RuntimeReconciliationService:
             expected_thread=expected_thread,
         )
 
-    async def reconcile_target_e2e(
+    async def reconcile_production_runtime(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
-    ) -> TargetE2EReconciliationArtifacts:
-        return await self._handle.require_runtime().reconciliation_service.reconcile_target_e2e(
+    ) -> ProductionReconciliationArtifacts:
+        return await self._handle.require_runtime().reconciliation_service.reconcile_production_runtime(
             command=command,
             verified_invocation=verified_invocation,
             expected_thread=expected_thread,
         )
 
-    async def retrieve_target_e2e_proposal_source(
+    async def retrieve_production_runtime_proposal_source(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         expected_result_ref: str,
         expected_proposal_hash: str,
-    ) -> TargetE2ERoomProposalSource:
-        return await self._handle.require_runtime().reconciliation_service.retrieve_target_e2e_proposal_source(
+    ) -> ProductionRoomProposalSource:
+        return await self._handle.require_runtime().reconciliation_service.retrieve_production_runtime_proposal_source(
             command=command,
             verified_invocation=verified_invocation,
             expected_thread=expected_thread,

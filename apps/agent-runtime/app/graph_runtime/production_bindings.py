@@ -1,4 +1,4 @@
-"""Deployment-owned bindings for SHADOW and isolated target-E2E runtimes."""
+"""Deployment-owned bindings for SHADOW and isolated production-runtime runtimes."""
 
 from __future__ import annotations
 
@@ -67,23 +67,23 @@ from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
-from app.graph_runtime.target_e2e import (
-    TargetE2EInputAuthorizer,
-    TargetE2EThreadIdentityResolver,
+from app.graph_runtime.production_runtime import (
+    ProductionInputAuthorizer,
+    ProductionThreadIdentityResolver,
 )
-from app.graph_runtime.target_e2e_composite import (
-    TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
-    TARGET_E2E_GRAPH_KEY,
-    TARGET_E2E_GRAPH_VERSION,
-    TARGET_E2E_OUTPUT_SCHEMA_VERSION,
-    TARGET_E2E_ROOM_TYPES,
-    TargetE2ECompositeExecutor,
-    TargetE2ERoomProvider,
+from app.graph_runtime.production_runtime_composite import (
+    PRODUCTION_RUNTIME_CHECKPOINT_SCHEMA_VERSION,
+    PRODUCTION_RUNTIME_GRAPH_KEY,
+    PRODUCTION_RUNTIME_GRAPH_VERSION,
+    PRODUCTION_RUNTIME_OUTPUT_SCHEMA_VERSION,
+    PRODUCTION_RUNTIME_ROOM_TYPES,
+    ProductionCompositeExecutor,
+    ProductionRoomProvider,
 )
-from app.graph_runtime.target_e2e_room_adapters import (
-    build_target_e2e_intake_provider,
+from app.graph_runtime.production_runtime_room_adapters import (
+    build_production_runtime_intake_provider,
 )
-from app.graph_runtime.target_e2e_room_exchange import JavaTargetE2ERoomExchange
+from app.graph_runtime.production_runtime_room_exchange import JavaProductionRoomExchange
 from app.graph_runtime.topology import build_shadow_kernel_graph
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.model_runner import HarnessModelRunner
@@ -239,13 +239,13 @@ class DeploymentManifestInputAuthorizer:
 def build_graph_runtime_bindings(
     settings: Settings,
     *,
-    target_e2e_provider_factory: (
-        Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
+    production_runtime_provider_factory: (
+        Callable[[GraphExecutorKernel], Iterable[ProductionRoomProvider]] | None
     ) = None,
-    target_e2e_specialized_provider_factory: (
-        Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
+    production_runtime_specialized_provider_factory: (
+        Callable[[GraphExecutorKernel], Iterable[ProductionRoomProvider]] | None
     ) = None,
-    target_e2e_room_exchange: JavaTargetE2ERoomExchange | None = None,
+    production_runtime_room_exchange: JavaProductionRoomExchange | None = None,
 ) -> GraphRuntimeBindings:
     """Build non-overridable exact bindings from validated deployment settings."""
 
@@ -256,15 +256,15 @@ def build_graph_runtime_bindings(
             raise ValueError("signed-synthetic SHADOW bindings are incomplete")
         resolver = DeploymentManifestThreadResolver(bindings, threads)
         authorizer = DeploymentManifestInputAuthorizer(bindings, threads)
-    elif settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
-        bindings = tuple(settings.graph_target_e2e_bindings)
+    elif settings.graph_gateway_mode == "PRODUCTION":
+        bindings = tuple(settings.graph_production_runtime_bindings)
         if not bindings:
-            raise ValueError("target-E2E runtime requires exact candidate bindings")
-        resolver = TargetE2EThreadIdentityResolver()
-        authorizer = TargetE2EInputAuthorizer()
+            raise ValueError("production-runtime runtime requires exact candidate bindings")
+        resolver = ProductionThreadIdentityResolver()
+        authorizer = ProductionInputAuthorizer()
     else:
         raise ValueError(
-            "production Graph bindings are available only in SHADOW or TARGET_E2E_CANDIDATE"
+            "production Graph bindings are available only in SHADOW or PRODUCTION"
         )
     structured_client: LiteLlmProxyClient | None = None
     intake_transport: Any = None
@@ -274,8 +274,8 @@ def build_graph_runtime_bindings(
     parallel_intake_prompts: PromptRepository | None = None
     parallel_intake_model_runner: HarnessModelRunner | None = None
     target_uses_default_providers = (
-        settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
-        and target_e2e_provider_factory is None
+        settings.graph_gateway_mode == "PRODUCTION"
+        and production_runtime_provider_factory is None
     )
     shadow_has_intake = settings.graph_gateway_mode == "SHADOW" and any(
         binding.graph_key == "intake.v2" for binding in bindings
@@ -299,23 +299,23 @@ def build_graph_runtime_bindings(
                 llm=structured_client,
                 prompts=parallel_intake_prompts,
             )
-            evidence_workflow = _build_target_e2e_evidence_workflow(
+            evidence_workflow = _build_production_runtime_evidence_workflow(
                 settings=settings,
                 structured_client=structured_client,
             )
-            hearing_workflow = _build_target_e2e_hearing_workflow(structured_client)
+            hearing_workflow = _build_production_runtime_hearing_workflow(structured_client)
 
     async def open_http_resources() -> None:
-        if target_e2e_room_exchange is not None:
-            await target_e2e_room_exchange.aopen()
+        if production_runtime_room_exchange is not None:
+            await production_runtime_room_exchange.aopen()
         try:
             if intake_exchange is not None:
                 await intake_exchange.aopen()
             if structured_client is not None:
                 await structured_client.aopen()
         except BaseException:
-            if target_e2e_room_exchange is not None:
-                await target_e2e_room_exchange.aclose()
+            if production_runtime_room_exchange is not None:
+                await production_runtime_room_exchange.aclose()
             raise
 
     async def close_http_resources() -> None:
@@ -327,17 +327,17 @@ def build_graph_runtime_bindings(
                 if structured_client is not None:
                     await structured_client.aclose()
         finally:
-            if target_e2e_room_exchange is not None:
-                await target_e2e_room_exchange.aclose()
+            if production_runtime_room_exchange is not None:
+                await production_runtime_room_exchange.aclose()
 
     def executor_registry_factory(
         kernel: GraphExecutorKernel,
     ) -> ExactShadowExecutorRegistry:
-        if settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
+        if settings.graph_gateway_mode == "PRODUCTION":
             providers = (
-                target_e2e_provider_factory(kernel)
-                if target_e2e_provider_factory is not None
-                else _build_target_e2e_room_providers(
+                production_runtime_provider_factory(kernel)
+                if production_runtime_provider_factory is not None
+                else _build_production_runtime_room_providers(
                     kernel,
                     intake_transport=intake_transport,
                     intake_exchange=intake_exchange,
@@ -353,12 +353,12 @@ def build_graph_runtime_bindings(
                     ),
                     evidence_workflow=evidence_workflow,
                     hearing_workflow=hearing_workflow,
-                    specialized_provider_factory=target_e2e_specialized_provider_factory,
+                    specialized_provider_factory=production_runtime_specialized_provider_factory,
                 )
             )
             return ExactShadowExecutorRegistry(
                 (
-                    _target_e2e_executor_registration(
+                    _production_runtime_executor_registration(
                         bindings[0],
                         kernel,
                         providers=providers,
@@ -458,7 +458,7 @@ def build_graph_runtime_bindings(
             if (
                 structured_client is not None
                 or intake_exchange is not None
-                or target_e2e_room_exchange is not None
+                or production_runtime_room_exchange is not None
             )
             else None
         ),
@@ -467,7 +467,7 @@ def build_graph_runtime_bindings(
             if (
                 structured_client is not None
                 or intake_exchange is not None
-                or target_e2e_room_exchange is not None
+                or production_runtime_room_exchange is not None
             )
             else None
         ),
@@ -479,11 +479,11 @@ def build_graph_runtime_bindings(
     )
 
 
-def _target_e2e_executor_registration(
+def _production_runtime_executor_registration(
     configured: GraphShadowBindingSettings,
     kernel: GraphExecutorKernel,
     *,
-    providers: Iterable[TargetE2ERoomProvider],
+    providers: Iterable[ProductionRoomProvider],
     intake_provider: str | None = None,
     intake_model: str | None = None,
     evidence_provider: str | None = None,
@@ -493,21 +493,21 @@ def _target_e2e_executor_registration(
 ) -> ShadowExecutorRegistration:
     del kernel
     if (
-        configured.graph_key != TARGET_E2E_GRAPH_KEY
-        or configured.graph_version != TARGET_E2E_GRAPH_VERSION
-        or configured.checkpoint_schema_version != TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
-        or configured.output_schema_version != TARGET_E2E_OUTPUT_SCHEMA_VERSION
+        configured.graph_key != PRODUCTION_RUNTIME_GRAPH_KEY
+        or configured.graph_version != PRODUCTION_RUNTIME_GRAPH_VERSION
+        or configured.checkpoint_schema_version != PRODUCTION_RUNTIME_CHECKPOINT_SCHEMA_VERSION
+        or configured.output_schema_version != PRODUCTION_RUNTIME_OUTPUT_SCHEMA_VERSION
         or frozenset(configured.allowed_room_types)
-        != {room.value for room in TARGET_E2E_ROOM_TYPES}
+        != {room.value for room in PRODUCTION_RUNTIME_ROOM_TYPES}
     ):
-        raise GraphContractError("target-E2E executor differs from the frozen composite binding")
+        raise GraphContractError("production-runtime executor differs from the frozen composite binding")
     binding = _version_binding(configured)
     if (intake_provider is None) != (intake_model is None):
-        raise GraphContractError("target-E2E Intake provider binding is incomplete")
+        raise GraphContractError("production-runtime Intake provider binding is incomplete")
     if (evidence_provider is None) != (evidence_model is None):
-        raise GraphContractError("target-E2E Evidence provider binding is incomplete")
+        raise GraphContractError("production-runtime Evidence provider binding is incomplete")
     if (hearing_provider is None) != (hearing_model is None):
-        raise GraphContractError("target-E2E Hearing provider binding is incomplete")
+        raise GraphContractError("production-runtime Hearing provider binding is incomplete")
     room_provider_bindings: list[tuple[str, ProviderRuntimeBinding]] = []
     if intake_provider is not None and intake_model is not None:
         room_provider_bindings.append(
@@ -547,18 +547,18 @@ def _target_e2e_executor_registration(
         )
     return ShadowExecutorRegistration(
         binding=binding,
-        executor=TargetE2ECompositeExecutor(providers),
+        executor=ProductionCompositeExecutor(providers),
         provider_binding=ProviderRuntimeBinding(
             model_profile_id=binding.model_profile_id,
-            provider="target-e2e-composite",
+            provider="production-runtime-composite",
             model="room-provider-dispatch",
-            allowed_nodes=frozenset(room.value for room in TARGET_E2E_ROOM_TYPES),
+            allowed_nodes=frozenset(room.value for room in PRODUCTION_RUNTIME_ROOM_TYPES),
         ),
         room_provider_bindings=tuple(room_provider_bindings),
     )
 
 
-def _build_target_e2e_room_providers(
+def _build_production_runtime_room_providers(
     kernel: GraphExecutorKernel,
     *,
     intake_transport: Any,
@@ -568,34 +568,34 @@ def _build_target_e2e_room_providers(
     evidence_workflow: EvidenceTurnWorkflowV2 | None,
     hearing_workflow: HearingFlowWorkflows | None,
     specialized_provider_factory: (
-        Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
+        Callable[[GraphExecutorKernel], Iterable[ProductionRoomProvider]] | None
     ),
-) -> tuple[TargetE2ERoomProvider, ...]:
+) -> tuple[ProductionRoomProvider, ...]:
     if (
         intake_transport is None
         or intake_exchange is None
         or not intake_provider
         or not intake_model
     ):
-        raise GraphContractError("TARGET_E2E_INTAKE_RUNTIME_DEPENDENCIES_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_INTAKE_RUNTIME_DEPENDENCIES_REQUIRED")
     if specialized_provider_factory is None:
-        raise GraphContractError("TARGET_E2E_SPECIALIZED_ROOM_RUNTIME_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_SPECIALIZED_ROOM_RUNTIME_REQUIRED")
     if (
         not callable(getattr(evidence_workflow, "run", None))
         or not callable(getattr(evidence_workflow, "arun", None))
         or getattr(evidence_workflow, "protocol_version", None)
         != "evidence-turn-result.v3"
     ):
-        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
-    if not callable(getattr(hearing_workflow, "target_e2e_invocation", None)):
-        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
+    if not callable(getattr(hearing_workflow, "production_runtime_invocation", None)):
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_HEARING_WORKFLOW_REQUIRED")
     bind_evidence_workflow = getattr(
         specialized_provider_factory,
         "with_evidence_workflow",
         None,
     )
     if not callable(bind_evidence_workflow):
-        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_FACTORY_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_EVIDENCE_FACTORY_REQUIRED")
     specialized_provider_factory = bind_evidence_workflow(evidence_workflow)
     bind_hearing_workflow = getattr(
         specialized_provider_factory,
@@ -603,7 +603,7 @@ def _build_target_e2e_room_providers(
         None,
     )
     if not callable(bind_hearing_workflow):
-        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_FACTORY_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_HEARING_FACTORY_REQUIRED")
     specialized_provider_factory = bind_hearing_workflow(hearing_workflow)
     specialized = tuple(specialized_provider_factory(kernel))
     if {getattr(provider, "room_type", None) for provider in specialized} != {
@@ -611,9 +611,9 @@ def _build_target_e2e_room_providers(
         RoomType.HEARING,
         RoomType.REVIEW,
     } or len(specialized) != 3:
-        raise GraphContractError("TARGET_E2E_SPECIALIZED_ROOM_RUNTIME_INVALID")
+        raise GraphContractError("PRODUCTION_RUNTIME_SPECIALIZED_ROOM_RUNTIME_INVALID")
     return (
-        build_target_e2e_intake_provider(
+        build_production_runtime_intake_provider(
             saver=kernel.saver,
             transport=intake_transport,
             provider=intake_provider,
@@ -624,7 +624,7 @@ def _build_target_e2e_room_providers(
     )
 
 
-def _build_target_e2e_evidence_workflow(
+def _build_production_runtime_evidence_workflow(
     *,
     settings: Settings,
     structured_client: LiteLlmProxyClient,
@@ -632,7 +632,7 @@ def _build_target_e2e_evidence_workflow(
     """Bind the formal Clerk to the lifecycle-owned shared model client."""
 
     if not isinstance(structured_client, LiteLlmProxyClient):
-        raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_MODEL_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_EVIDENCE_MODEL_REQUIRED")
     return EvidenceTurnWorkflowV2(
         model_runner=HarnessModelRunner(
             llm=structured_client,
@@ -645,13 +645,13 @@ def _build_target_e2e_evidence_workflow(
     )
 
 
-def _build_target_e2e_hearing_workflow(
+def _build_production_runtime_hearing_workflow(
     structured_client: LiteLlmProxyClient,
 ) -> HearingFlowWorkflows:
     """Bind all seven formal Hearing operations to the lifecycle-owned model client."""
 
     if not isinstance(structured_client, LiteLlmProxyClient):
-        raise GraphContractError("TARGET_E2E_FORMAL_HEARING_MODEL_REQUIRED")
+        raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_HEARING_MODEL_REQUIRED")
     return HearingFlowWorkflows(
         HarnessModelRunner(
             llm=structured_client,

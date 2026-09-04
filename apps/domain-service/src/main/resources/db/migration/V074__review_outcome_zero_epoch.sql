@@ -1,11 +1,11 @@
 -- The shared room coordinate contract is zero-based. Review is the source room for Outcome,
 -- so its first durable epoch is 0 just like the first Intake, Evidence, and Hearing epochs.
 
-alter table target_e2e_outcome_completion_fact
-    drop constraint ck_target_e2e_outcome_completion_shape;
+alter table production_runtime_outcome_completion_fact
+    drop constraint ck_production_runtime_outcome_completion_shape;
 
-alter table target_e2e_outcome_completion_fact
-    add constraint ck_target_e2e_outcome_completion_shape check (
+alter table production_runtime_outcome_completion_fact
+    add constraint ck_production_runtime_outcome_completion_shape check (
       outcome_epoch >= 0 and fencing_token >= 1 and revision >= 1
       and committed_event_sequence >= 1
       and human_receipt_hash ~ '^[0-9a-f]{64}$'
@@ -18,10 +18,10 @@ alter table target_e2e_outcome_completion_fact
       )
     );
 
-alter table target_e2e_review_non_execution_completion
+alter table production_runtime_review_non_execution_completion
     drop constraint ck_target_review_non_execution_shape;
 
-alter table target_e2e_review_non_execution_completion
+alter table production_runtime_review_non_execution_completion
     add constraint ck_target_review_non_execution_shape check (
         schema_version = 'target-review-non-execution-disposition.v1'
         and decision_type in ('REJECT', 'REQUEST_MORE_EVIDENCE', 'ESCALATE_MANUAL')

@@ -18,9 +18,9 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochBootstrapEnqueuer;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.SuccessorContext;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter.BindingContext;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter.SuccessorContext;
 import java.time.OffsetDateTime;
 import java.util.Objects;
 import java.util.UUID;
@@ -560,7 +560,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         if (selection.writerMode() == WriterMode.TEMPORAL
                 && selection.targetActivationBinding() == null) {
             throw failure(
-                    "TARGET_E2E_ACTIVATION_BINDING_MISSING",
+                    "PRODUCTION_RUNTIME_ACTIVATION_BINDING_MISSING",
                     "TEMPORAL room epoch selection requires a target activation binding");
         }
         if (selection.writerMode() != WriterMode.LEGACY
@@ -582,7 +582,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         }
         if (selection.writerMode() != WriterMode.TEMPORAL) {
             throw failure(
-                    "TARGET_E2E_ACTIVATION_BINDING_INVALID",
+                    "PRODUCTION_RUNTIME_ACTIVATION_BINDING_INVALID",
                     "only a TEMPORAL room epoch can persist a target activation binding");
         }
         targetBindingAuthority()
@@ -617,13 +617,13 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
     private TargetRoomEpochBindingWriter targetBindingAuthority() {
         if (targetBindingWriter == null) {
             throw failure(
-                    "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
+                    "PRODUCTION_RUNTIME_ACTIVATION_BINDING_UNAVAILABLE",
                     "target room epoch binding writer is unavailable");
         }
         var writers = targetBindingWriter.stream().toList();
         if (writers.size() != 1) {
             throw failure(
-                    "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
+                    "PRODUCTION_RUNTIME_ACTIVATION_BINDING_UNAVAILABLE",
                     "target room epoch binding requires exactly one writer");
         }
         return writers.getFirst();

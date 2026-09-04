@@ -1,5 +1,5 @@
 -- Bring the reviewer-only demo purge boundary forward to the current schema.
--- Global Target-E2E activation, case-id claim/reservation, and tombstone authority
+-- Global Production-Runtime activation, case-id claim/reservation, and tombstone authority
 -- deliberately remain outside the case-owned purge graph.
 
 create or replace function demo_case_purge_row_case_id(
@@ -42,7 +42,7 @@ begin
     elsif p_row ? 'admission_id' then
         select admission.case_id
         into resolved_case_id
-        from target_e2e_command_admission admission
+        from production_runtime_command_admission admission
         where admission.admission_id = p_row ->> 'admission_id';
     end if;
 
@@ -118,18 +118,18 @@ begin
 end;
 $$;
 
-create or replace function reject_target_e2e_append_only_mutation()
+create or replace function reject_production_runtime_append_only_mutation()
 returns trigger
 language plpgsql
 as $$
 begin
     if tg_op = 'DELETE'
        and tg_table_name not in (
-           'target_e2e_activation',
-           'target_e2e_environment_generation_watermark',
-           'target_e2e_case_id_claim',
-           'target_e2e_case_reservation',
-           'target_e2e_generated_case_tombstone'
+           'production_runtime_activation',
+           'production_runtime_environment_generation_watermark',
+           'production_runtime_case_id_claim',
+           'production_runtime_case_reservation',
+           'production_runtime_generated_case_tombstone'
        )
     then
         if tg_level = 'ROW'
@@ -276,25 +276,25 @@ begin
         purge_definition,
         'delete from agent_execution_manifest where case_id = p_case_id;',
         $purge$
-    -- Target-E2E material and completion leaves. Global activation,
+    -- Production-Runtime material and completion leaves. Global activation,
     -- case-id claim/reservation, and generated tombstone authority is retained.
-    delete from target_e2e_command_completion
+    delete from production_runtime_command_completion
     where admission_id in (
         select admission_id
-        from target_e2e_command_admission
+        from production_runtime_command_admission
         where case_id = p_case_id
     );
-    delete from target_e2e_evidence_command_material where case_id = p_case_id;
-    delete from target_e2e_evidence_completion_command_material where case_id = p_case_id;
-    delete from target_e2e_hearing_command_material where case_id = p_case_id;
-    delete from target_e2e_intake_command_material where case_id = p_case_id;
-    delete from target_e2e_review_command_material where case_id = p_case_id;
-    delete from target_e2e_review_non_execution_completion where case_id = p_case_id;
-    delete from target_e2e_evidence_terminal_receipt where case_id = p_case_id;
-    delete from target_e2e_outcome_completion_fact where case_id = p_case_id;
-    delete from target_e2e_review_epoch_task_binding where case_id = p_case_id;
-    delete from target_e2e_room_object_binding where case_id = p_case_id;
-    delete from target_e2e_room_object_index where case_id = p_case_id;
+    delete from production_runtime_evidence_command_material where case_id = p_case_id;
+    delete from production_runtime_evidence_completion_command_material where case_id = p_case_id;
+    delete from production_runtime_hearing_command_material where case_id = p_case_id;
+    delete from production_runtime_intake_command_material where case_id = p_case_id;
+    delete from production_runtime_review_command_material where case_id = p_case_id;
+    delete from production_runtime_review_non_execution_completion where case_id = p_case_id;
+    delete from production_runtime_evidence_terminal_receipt where case_id = p_case_id;
+    delete from production_runtime_outcome_completion_fact where case_id = p_case_id;
+    delete from production_runtime_review_epoch_task_binding where case_id = p_case_id;
+    delete from production_runtime_room_object_binding where case_id = p_case_id;
+    delete from production_runtime_room_object_index where case_id = p_case_id;
 
     -- Public-frame and exact-three technical staging leaves.
     delete from hearing_public_frame_binding_v4 where case_id = p_case_id;
@@ -425,9 +425,9 @@ begin
 
     -- Target command/epoch and finalization authority. The receipt must be
     -- removed after parallel frame sets and before its execution manifest.
-    delete from target_e2e_command_admission where case_id = p_case_id;
-    delete from target_e2e_room_epoch_binding where case_id = p_case_id;
-    delete from target_e2e_finalization_receipt where case_id = p_case_id;
+    delete from production_runtime_command_admission where case_id = p_case_id;
+    delete from production_runtime_room_epoch_binding where case_id = p_case_id;
+    delete from production_runtime_finalization_receipt where case_id = p_case_id;
     delete from agent_execution_manifest where case_id = p_case_id;$purge$
     );
 
@@ -449,4 +449,4 @@ end;
 $migration$;
 
 comment on function purge_simulated_dispute_case(varchar, varchar, varchar)
-    is 'Physically deletes reviewer-approved demo cases across the current case-owned graph, preserves an audit snapshot, and retains global Target-E2E anti-reuse authority.';
+    is 'Physically deletes reviewer-approved demo cases across the current case-owned graph, preserves an audit snapshot, and retains global Production-Runtime anti-reuse authority.';

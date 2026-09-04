@@ -16,12 +16,16 @@ proposal/receipt 交由 Java Finalizer 验收；Temporal 负责编排顺序，�
 
 | 数据面 | 迁移目录 | 当前上限 |
 | --- | --- | --- |
-| Java / Domain | `apps/domain-service/src/main/resources/db/migration` | `V094__target_e2e_graph_patch_release_identity.sql` |
+| Java / Domain | `apps/domain-service/src/main/resources/db/migration` | `V094__production_runtime_graph_patch_release_identity.sql` |
 | Python / Graph | `apps/agent-runtime/migrations/graph` | `G017_fanout_command_terminalization_authority.sql` |
 
 两组 migration 都是追加式兼容历史：已发布文件不得重命名、改写或复用版本号。Java 使用
 `ddl-auto=validate`，禁止 Hibernate 自动改表；Graph runtime 必须先验证 migration 与
 GraphRegistry/checkpoint 身份，再接收命令。
+
+本轮 `production-runtime` 重构发生在首次生产发布前，重构后的 migration 内容与校验和
+构成第一份生产基线；旧预生产数据库不在兼容范围内。首次发布完成后，上述不可改写规则
+立即适用于这套生产基线。
 
 Temporal core/visibility schema 不由应用 Flyway 或 Graph migration 管理。Temporal Server
 及其 schema 的任何升级都需要单独授权、同版本工具、备份恢复证据和逐版本验收，应用启动

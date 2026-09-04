@@ -44,7 +44,7 @@ import java.util.regex.Pattern;
 public final class IntakeParallelFrameAssembler {
 
     public static final String PROPOSAL_SCHEMA = "intake-turn-proposal.v2";
-    public static final String TARGET_RESULT_SCHEMA = "target-e2e-room-proposal-source.v2";
+    public static final String TARGET_RESULT_SCHEMA = "production-runtime-room-proposal-source.v2";
     public static final String EXECUTION_PROFILE = "PARALLEL_FRAMES_V1";
     private static final int QUALITY_THRESHOLD = 85;
     private static final int DIALOGUE_SEGMENT_LIMIT = 1;
@@ -148,7 +148,7 @@ public final class IntakeParallelFrameAssembler {
         String inputSetSha256 = inputSetSha256(command, frames, previous);
         String proposalHashPrefix = proposal.proposalHash().substring(0, 32);
         String artifactId = "intake.proposal." + proposalHashPrefix;
-        String artifactUri = "urn:target-e2e:proposal:intake:" + proposal.proposalHash();
+        String artifactUri = "urn:production-runtime:proposal:intake:" + proposal.proposalHash();
         String checkpointId = "IPCK_" + inputSetSha256.substring(0, 32);
         RoomGraphResult graphResult = graphResult(
                 command,
@@ -1268,7 +1268,7 @@ public final class IntakeParallelFrameAssembler {
             inputSetSha256 = sha256(inputSetSha256, "inputSetSha256");
             artifactId = identifier(artifactId, "artifactId");
             if (artifactUri == null
-                    || !artifactUri.equals("urn:target-e2e:proposal:intake:" + proposalSha256)) {
+                    || !artifactUri.equals("urn:production-runtime:proposal:intake:" + proposalSha256)) {
                 throw new IllegalArgumentException("artifactUri is not the canonical Intake proposal URN");
             }
             proposalSha256 = sha256(proposalSha256, "proposalSha256");

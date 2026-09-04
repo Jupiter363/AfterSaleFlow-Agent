@@ -1,5 +1,0 @@
-{
-  "schema_version": "target-e2e-room-proposal-source.v2",
-  "room_type": "EVIDENCE",
-  "proposal": {"schema_version": "target-e2e-evidence-proposal.v2", "proposal_id": "proposal-evidence-001", "command_id": "command-evidence-001", "logical_run_id": "run-evidence-001", "attempt_id": "attempt-evidence-001", "payload_schema_version": "target-e2e-evidence-turn-proposal.v2", "payload_ref": "urn:target-e2e:proposal:evidence:001", "payload_hash": "2222222222222222222222222222222222222222222222222222222222222222", "terminal_class": "COMPLETED", "formal_authority": false}
-}

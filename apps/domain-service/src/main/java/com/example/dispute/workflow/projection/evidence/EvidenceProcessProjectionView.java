@@ -1,7 +1,7 @@
 package com.example.dispute.workflow.projection.evidence;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -79,7 +79,7 @@ public record EvidenceProcessProjectionView(
         requireEnum(writerMode, Set.of("LEGACY", "SHADOW", "TEMPORAL"), "writerMode");
         requireEnum(
                 graphRuntimeMode,
-                Set.of("DISABLED", "SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"),
+                Set.of("DISABLED", "SIGNED_SYNTHETIC_SHADOW", "PRODUCTION"),
                 "graphRuntimeMode");
         if ("TEMPORAL".equals(writerMode)) {
             if (formalSinkAllowed
@@ -237,7 +237,7 @@ public record EvidenceProcessProjectionView(
             return;
         }
         if ("TEMPORAL".equals(writerMode)) {
-            if (!"TARGET_E2E_CANDIDATE".equals(graphRuntimeMode)
+            if (!"PRODUCTION".equals(graphRuntimeMode)
                     || roomId == null
                     || fencingToken < 1
                     || !pins.hasTargetComposite()
@@ -584,19 +584,19 @@ public record EvidenceProcessProjectionView(
                     "target checkpointSchemaVersion");
             requireEquals(
                     promptVersion,
-                    "all-rooms-prompt.target-e2e.v2",
+                    "all-rooms-prompt.production-runtime.v2",
                     "target promptVersion");
             requireEquals(
                     modelProfileId,
-                    "target-e2e.contract-blocked",
+                    "production-runtime.contract-blocked",
                     "target modelProfileId");
             requireEquals(
                     policyVersion,
-                    "all-rooms-policy.target-e2e.v1",
+                    "all-rooms-policy.production-runtime.v1",
                     "target policyVersion");
             requireEquals(
                     guardrailVersion,
-                    "all-rooms-guardrail.target-e2e.v1",
+                    "all-rooms-guardrail.production-runtime.v1",
                     "target guardrailVersion");
             requireEquals(toolPolicyVersion, "tools.none.v1", "target toolPolicyVersion");
             return new VersionPins(
@@ -626,12 +626,12 @@ public record EvidenceProcessProjectionView(
                     && TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION.equals(
                             checkpointSchemaVersion)
                     && "evidence-graph-state.v2".equals(stateSchemaVersion)
-                    && "all-rooms-prompt.target-e2e.v2".equals(promptVersion)
-                    && "target-e2e.contract-blocked".equals(modelProfileId)
+                    && "all-rooms-prompt.production-runtime.v2".equals(promptVersion)
+                    && "production-runtime.contract-blocked".equals(modelProfileId)
                     && "evidence-item-assessment.v1".equals(assessmentOutputSchemaVersion)
                     && "evidence-batch-proposal.v1".equals(terminalOutputSchemaVersion)
-                    && "all-rooms-policy.target-e2e.v1".equals(policyVersion)
-                    && "all-rooms-guardrail.target-e2e.v1".equals(guardrailVersion)
+                    && "all-rooms-policy.production-runtime.v1".equals(policyVersion)
+                    && "all-rooms-guardrail.production-runtime.v1".equals(guardrailVersion)
                     && "tools.none.v1".equals(toolPolicyVersion);
         }
     }

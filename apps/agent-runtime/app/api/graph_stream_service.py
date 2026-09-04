@@ -638,7 +638,7 @@ class GatewayBackedGraphCommandStreamService:
 
         if execution.fence.execution_lane is GraphGatewayMode.SHADOW:
             return execution
-        if execution.fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if execution.fence.execution_lane is not GraphGatewayMode.PRODUCTION:
             raise GraphContractError("execution has an invalid Graph lane")
         expected = (
             provider_binding.provider,

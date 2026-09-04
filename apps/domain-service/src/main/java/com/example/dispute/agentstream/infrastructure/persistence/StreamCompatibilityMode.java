@@ -59,7 +59,7 @@ public enum StreamCompatibilityMode {
     }
 
     /**
-     * Validates a proposed engineering transition. Once a target-only write exists, an old-only
+     * Validates a proposed engineering transition. Once a production-only write exists, an old-only
      * reader would hide a committed delivery event and is therefore never a legal rollback.
      */
     public static StreamCompatibilityMode requireTransition(
@@ -73,7 +73,7 @@ public enum StreamCompatibilityMode {
                 || (rollbackCoverage != null && rollbackCoverage.targetOnlyWriteObserved());
         if (targetOnlyWriteObserved && proposed.reader == Reader.OLD_ONLY) {
             throw new IllegalStateException(
-                    "old-only rollback is forbidden after a target-only stream write");
+                    "old-only rollback is forbidden after a production-only stream write");
         }
         if (proposed.reader == Reader.COMPATIBLE_UNION) {
             Objects.requireNonNull(rollbackCoverage, "rollbackCoverage")

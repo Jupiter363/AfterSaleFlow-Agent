@@ -129,25 +129,25 @@ class IntakePrivateThreadRegistrationTest {
                                 List.of("case:CASE_TARGET:command:INTAKE_MESSAGE")),
                         "target-agent-session",
                         new IntakePrivateThreadRegistrationFactory.VersionPins(
-                                "all-rooms.target-e2e.v1",
-                                "target-e2e-graph.2026-07-27.1",
-                                "target-e2e-checkpoint.v1",
+                                "all-rooms.production-runtime.v1",
+                                "production-runtime-graph.2026-07-27.1",
+                                "production-runtime-checkpoint.v1",
                                 "intake-graph-state.v2",
                                 "target-prompt",
                                 "target-model",
-                                "target-e2e-room-proposal-source.v1",
+                                "production-runtime-room-proposal-source.v1",
                                 "target-policy",
                                 "target-guardrail",
                                 "target-tool-policy"),
                         com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode.TEMPORAL,
                         Instant.parse("2026-07-28T00:00:00Z")));
 
-        assertThat(binding.registration().graphKey()).isEqualTo("all-rooms.target-e2e.v1");
-        assertThat(binding.registration().graphVersion()).isEqualTo("target-e2e-graph.2026-07-27.1");
-        assertThat(binding.registration().checkpointSchemaVersion()).isEqualTo("target-e2e-checkpoint.v1");
+        assertThat(binding.registration().graphKey()).isEqualTo("all-rooms.production-runtime.v1");
+        assertThat(binding.registration().graphVersion()).isEqualTo("production-runtime-graph.2026-07-27.1");
+        assertThat(binding.registration().checkpointSchemaVersion()).isEqualTo("production-runtime-checkpoint.v1");
         assertThat(binding.registration().stateSchemaVersion()).isEqualTo("intake-graph-state.v2");
         assertThat(binding.registration().outputSchemaVersion())
-                .isEqualTo("target-e2e-room-proposal-source.v1");
+                .isEqualTo("production-runtime-room-proposal-source.v1");
         binding.registration().requireCanonicalHash();
     }
 }

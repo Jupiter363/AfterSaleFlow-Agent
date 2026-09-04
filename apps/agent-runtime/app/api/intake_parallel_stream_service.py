@@ -58,7 +58,7 @@ from app.graph_runtime.ledger import (
 )
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction
-from app.graph_runtime.target_e2e import VerifiedTargetE2EInvocation
+from app.graph_runtime.production_runtime import VerifiedProductionInvocation
 from app.graphs.intake.parallel_contracts import FRAME_TYPES, ParallelFrameType
 from app.graphs.intake.parallel_graph import (
     FRAME_NODE_NAMES,
@@ -103,7 +103,7 @@ class _ParallelGateway(Protocol):
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> GatewayAdmission: ...
 
@@ -532,7 +532,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
@@ -653,7 +653,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ParallelFrameStreamAuthority:
         if verified_invocation.request_hash != command.request_hash:
@@ -673,7 +673,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> ParallelReceiptAbandonmentRecord:
@@ -719,7 +719,7 @@ class GatewayBackedParallelIntakeFrameStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
         failure_code: str,

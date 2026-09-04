@@ -24,8 +24,9 @@
 
 `adr/` 保留仍约束生产实现、版本兼容或恢复边界的架构决策。ADR 记录的是作出决策时的
 状态，旧日期、旧协议名和迁移 Check ID 不应被解释为当前运行状态；当前状态以本页列出的
-权威文档和代码为准。已完成的阶段准入例外、候选计划和冻结工程证据不再保存在 `main`；完整历史可从备份分支
-`codex/main-full-backup-20260904-f5cb0686` 查阅。
+权威文档和代码为准。已完成的阶段准入例外、候选计划和冻结工程证据不再保存在 `main`；
+本轮重构前的完整历史可从备份分支
+`codex/main-pre-production-runtime-refactor-20260904` 查阅。
 
 ADR 0018 将当前 `main` 定义为 `production-contract-baseline.v1`。该版本只标识当前生产
 合同组合，不覆盖各协议已经持久化的 v1/v2/v3/v4 discriminator。

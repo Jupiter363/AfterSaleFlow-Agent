@@ -1,7 +1,7 @@
 package com.example.dispute.workflow.temporal.room.evidence;
 
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTerminalActivities;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceTerminalActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
@@ -402,7 +402,7 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     boolean targetTerminal =
         targetLaneVersion == Workflow.DEFAULT_VERSION
             ? start.legacyTargetBuildMarker()
-            : start.targetE2eCandidate();
+            : start.productionCandidate();
     if (!targetTerminal || terminalProgressReceipt != null) {
       return;
     }

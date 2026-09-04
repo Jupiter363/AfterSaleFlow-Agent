@@ -54,11 +54,11 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -223,8 +223,8 @@ public class EvidenceCompletionService {
                 dispute.getId(), evidenceRoom.getId(), "EVIDENCE_PARTY_COMPLETION_INTENT", intent,
                 "target-evidence-completion:" + completion.getId(), actor.actorId());
         PayloadRef payload = canonicalPayload(
-                "target-e2e-evidence-completion.v1",
-                "urn:target-e2e:timeline-event:" + event.getId(),
+                "production-runtime-evidence-completion.v1",
+                "urn:production-runtime:timeline-event:" + event.getId(),
                 intent);
         AcceptCaseCommand command = new AcceptCaseCommand(
                 CommandType.PARTY_EVIDENCE_COMPLETE,

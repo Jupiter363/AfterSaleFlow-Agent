@@ -26,7 +26,7 @@
     },
     {
       "id": "TARGET_ACTIVATION_SCOPE",
-      "rule": "TARGET_E2E_CANDIDATE is TEMPORAL, proposal-only, and its tenant/case identity is admitted by the persisted target activation reservation"
+      "rule": "PRODUCTION is TEMPORAL, proposal-only, and its tenant/case identity is admitted by the persisted target activation reservation"
     },
     {
       "id": "DISABLED_NO_RUN",
@@ -138,7 +138,7 @@
       "enum": [
         "DISABLED",
         "SIGNED_SYNTHETIC_SHADOW",
-        "TARGET_E2E_CANDIDATE"
+        "PRODUCTION"
       ]
     },
     "formal_sink_allowed": {
@@ -375,7 +375,7 @@
         "required": ["graph_runtime_mode"],
         "properties": {
           "graph_runtime_mode": {
-            "const": "TARGET_E2E_CANDIDATE"
+            "const": "PRODUCTION"
           }
         }
       },
@@ -399,8 +399,8 @@
                   {"$ref": "#/$defs/graph_run"},
                   {
                     "properties": {
-                      "graph_version": {"const": "target-e2e-graph.2026-08-18.1"},
-                      "checkpoint_schema_version": {"const": "target-e2e-checkpoint.v2"}
+                      "graph_version": {"const": "production-runtime-graph.2026-08-18.1"},
+                      "checkpoint_schema_version": {"const": "production-runtime-checkpoint.v2"}
                     }
                   }
                 ]
@@ -410,15 +410,15 @@
           "version_pins": {
             "properties": {
               "workflow_build_id": {"$ref": "#/$defs/identifier"},
-              "graph_version": {"const": "target-e2e-graph.2026-08-18.1"},
-              "checkpoint_schema_version": {"const": "target-e2e-checkpoint.v2"},
+              "graph_version": {"const": "production-runtime-graph.2026-08-18.1"},
+              "checkpoint_schema_version": {"const": "production-runtime-checkpoint.v2"},
               "state_schema_version": {"const": "evidence-graph-state.v2"},
-              "prompt_version": {"const": "all-rooms-prompt.target-e2e.v2"},
-              "model_profile_id": {"const": "target-e2e.contract-blocked"},
+              "prompt_version": {"const": "all-rooms-prompt.production-runtime.v2"},
+              "model_profile_id": {"const": "production-runtime.contract-blocked"},
               "assessment_output_schema_version": {"const": "evidence-item-assessment.v1"},
               "terminal_output_schema_version": {"const": "evidence-batch-proposal.v1"},
-              "policy_version": {"const": "all-rooms-policy.target-e2e.v1"},
-              "guardrail_version": {"const": "all-rooms-guardrail.target-e2e.v1"},
+              "policy_version": {"const": "all-rooms-policy.production-runtime.v1"},
+              "guardrail_version": {"const": "all-rooms-guardrail.production-runtime.v1"},
               "tool_policy_version": {"const": "tools.none.v1"}
             }
           }
@@ -432,7 +432,7 @@
       },
       "then": {
         "properties": {
-          "graph_runtime_mode": {"const": "TARGET_E2E_CANDIDATE"},
+          "graph_runtime_mode": {"const": "PRODUCTION"},
           "temporal_evidence_allocation_allowed": {"const": true}
         }
       },

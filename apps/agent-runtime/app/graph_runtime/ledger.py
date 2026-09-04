@@ -26,9 +26,9 @@ from app.graph_runtime.errors import (
 from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier, _sha256
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import CommandProfileBinding
-from app.graph_runtime.target_e2e import (
-    TargetE2EGraphResultEnvelope,
-    TargetE2ERoomProposalSource,
+from app.graph_runtime.production_runtime import (
+    ProductionGraphResultEnvelope,
+    ProductionRoomProposalSource,
 )
 from app.security.invocation_envelope import INVOCATION_CLOCK_SKEW_SECONDS
 
@@ -144,7 +144,7 @@ class CommandBinding:
             GraphGatewayMode.DISABLED
         ):
             raise GraphContractError("command execution lane is invalid")
-        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if self.execution_lane is GraphGatewayMode.PRODUCTION:
             if self.activation_id is None or re.fullmatch(
                 r"p9act\.v1\.[0-9a-f]{32}", self.activation_id
             ) is None:
@@ -1335,7 +1335,7 @@ class CompletedStartCheckpoint:
             raise GraphTerminalBindingError(
                 "completed start checkpoint result binding is invalid"
             )
-        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if self.execution_lane is GraphGatewayMode.PRODUCTION:
             try:
                 _sha256(self.command_hash, "command_hash")
                 _sha256(self.command_envelope_hash, "command_envelope_hash")
@@ -1430,13 +1430,13 @@ select %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s,
        %s, %s, %s, %s, %s, %s, %s, %s, 'REGISTERED'
  where %s > clock_timestamp()
    and (
-       %s <> 'TARGET_E2E_CANDIDATE'
+       %s <> 'PRODUCTION'
        or exists (
            select 1
-             from agent_graph_target_e2e_activation activation
-             join agent_graph_target_e2e_activation_lifecycle lifecycle
+             from agent_graph_production_runtime_activation activation
+             join agent_graph_production_runtime_activation_lifecycle lifecycle
                on lifecycle.activation_id = activation.activation_id
-             join agent_graph_target_e2e_environment_generation generation
+             join agent_graph_production_runtime_environment_generation generation
                on generation.environment_id = activation.environment_id
             where activation.activation_id = %s
               and lifecycle.lifecycle_state = 'ACTIVE'
@@ -1449,12 +1449,12 @@ on conflict (thread_id, command_id) do nothing
 returning {COMMAND_COLUMNS}
 """
 
-LOCK_TARGET_E2E_ADMISSION_SQL: Final[str] = """
+LOCK_PRODUCTION_RUNTIME_ADMISSION_SQL: Final[str] = """
 select lifecycle.lifecycle_state
-  from agent_graph_target_e2e_activation activation
-  join agent_graph_target_e2e_activation_lifecycle lifecycle
+  from agent_graph_production_runtime_activation activation
+  join agent_graph_production_runtime_activation_lifecycle lifecycle
     on lifecycle.activation_id = activation.activation_id
-  join agent_graph_target_e2e_environment_generation generation
+  join agent_graph_production_runtime_environment_generation generation
     on generation.environment_id = activation.environment_id
  where activation.activation_id = %s
    and generation.activation_id = activation.activation_id
@@ -1493,7 +1493,7 @@ select command.start_checkpoint_ns, command.start_checkpoint_id,
 LOAD_CANDIDATE_TERMINAL_PROOF_SQL: Final[str] = f"""
 select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
   from agent_graph_command command
-  join agent_graph_target_e2e_activation activation
+  join agent_graph_production_runtime_activation activation
     on activation.activation_id = command.activation_id
   join agent_graph_invocation_nonce nonce
     on nonce.thread_id = command.thread_id
@@ -1502,7 +1502,7 @@ select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.spli
  where command.thread_id = %s
    and command.command_id = %s
    and command.request_hash = %s
-   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.execution_mode = 'PRODUCTION'
    and command.activation_id = %s
    and command.room_fencing_token = %s
    and command.command_hash = %s
@@ -1530,12 +1530,12 @@ select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.spli
 LOAD_CANDIDATE_RECONCILIATION_PROOF_SQL: Final[str] = f"""
 select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
   from agent_graph_command command
-  join agent_graph_target_e2e_activation activation
+  join agent_graph_production_runtime_activation activation
     on activation.activation_id = command.activation_id
  where command.thread_id = %s
    and command.command_id = %s
    and command.request_hash = %s
-   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.execution_mode = 'PRODUCTION'
    and command.activation_id = %s
    and command.room_fencing_token = %s
    and command.command_hash = %s
@@ -2167,8 +2167,8 @@ class PostgresCommandLedger:
         binding: CommandBinding,
         nonce: InvocationNonce,
     ) -> CommandRegistration:
-        if binding.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            await self._lock_target_e2e_admission(connection, binding)
+        if binding.execution_lane is GraphGatewayMode.PRODUCTION:
+            await self._lock_production_runtime_admission(connection, binding)
         params = self._insert_params(binding)
         row = await (await connection.execute(INSERT_COMMAND_SQL, params)).fetchone()
         created = row is not None
@@ -2187,7 +2187,7 @@ class PostgresCommandLedger:
         return CommandRegistration(record, created)
 
     @staticmethod
-    async def _lock_target_e2e_admission(
+    async def _lock_production_runtime_admission(
         connection: Any,
         binding: CommandBinding,
     ) -> None:
@@ -2196,7 +2196,7 @@ class PostgresCommandLedger:
             raise GraphCommandBindingError("candidate activation binding is absent")
         row = await (
             await connection.execute(
-                LOCK_TARGET_E2E_ADMISSION_SQL,
+                LOCK_PRODUCTION_RUNTIME_ADMISSION_SQL,
                 (activation_id,),
             )
         ).fetchone()
@@ -3249,9 +3249,9 @@ class PostgresCommandLedger:
 
         execution_provider: str | None = None
         execution_model: str | None = None
-        if result.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if result.execution_lane is GraphGatewayMode.PRODUCTION:
             try:
-                envelope = TargetE2EGraphResultEnvelope.model_validate(
+                envelope = ProductionGraphResultEnvelope.model_validate(
                     result.result_envelope_json
                 )
             except ValueError as error:
@@ -3905,7 +3905,7 @@ class PostgresCommandLedger:
             GraphGatewayMode.DISABLED
         ):
             raise GraphTerminalBindingError("result execution lane is invalid")
-        if result.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if result.execution_lane is GraphGatewayMode.PRODUCTION:
             if result.activation_id is None or re.fullmatch(
                 r"p9act\.v1\.[0-9a-f]{32}", result.activation_id
             ) is None:
@@ -3926,10 +3926,10 @@ class PostgresCommandLedger:
             ):
                 raise GraphTerminalBindingError("candidate result room fence is invalid")
             try:
-                proposal_source = TargetE2ERoomProposalSource.model_validate(
+                proposal_source = ProductionRoomProposalSource.model_validate(
                     result.proposal_source_json
                 )
-                envelope = TargetE2EGraphResultEnvelope.model_validate(
+                envelope = ProductionGraphResultEnvelope.model_validate(
                     result.result_envelope_json
                 )
                 nested = RoomGraphResult.model_validate(result.result_json)

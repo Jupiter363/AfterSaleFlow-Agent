@@ -33,7 +33,7 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
                 .contains("size_bytes between 2 and 65536")
                 .contains("size_bytes = octet_length(canonical_proposal_bytes)")
                 .contains("artifact_id = 'intake.proposal.' || left(proposal_sha256, 32)")
-                .contains("artifact_uri = 'urn:target-e2e:proposal:intake:' || proposal_sha256");
+                .contains("artifact_uri = 'urn:production-runtime:proposal:intake:' || proposal_sha256");
     }
 
     @Test
@@ -46,7 +46,7 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
                 .contains("canonical_command_envelope_bytes bytea not null")
                 .contains("canonical_proposal_source_bytes bytea not null")
                 .contains("canonical_result_envelope_bytes bytea not null")
-                .contains("result_ref = 'urn:target-e2e:result:intake:' || graph_result_sha256")
+                .contains("result_ref = 'urn:production-runtime:result:intake:' || graph_result_sha256")
                 .contains("trg_intake_parallel_graph_result_no_update")
                 .contains("trg_intake_parallel_graph_result_no_truncate");
     }
@@ -75,7 +75,7 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
                 .doesNotContain("insert into agent_execution_manifest")
                 .doesNotContain("update agent_run set finalization_status")
                 .doesNotContain("update case_command")
-                .doesNotContain("insert into target_e2e_agent_run_finalization_receipt");
+                .doesNotContain("insert into production_runtime_agent_run_finalization_receipt");
     }
 
     @Test
@@ -88,7 +88,7 @@ class IntakeParallelAssemblyArtifactMigrationContractTest {
 
         assertThat(sql)
                 .contains("foreign key (terminal_receipt_id)")
-                .contains("references target_e2e_finalization_receipt(receipt_id)")
+                .contains("references production_runtime_finalization_receipt(receipt_id)")
                 .contains("deferrable initially deferred");
     }
 

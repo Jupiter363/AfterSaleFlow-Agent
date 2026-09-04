@@ -25,7 +25,7 @@ from app.graphs.evidence.contracts import EvidenceGraphContractError, JsonObject
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_TARGET_SCOPE = "TARGET_E2E_CANDIDATE"
+_TARGET_SCOPE = "PRODUCTION"
 
 
 class EvidenceCandidateFactLink(BaseModel):

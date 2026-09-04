@@ -33,7 +33,7 @@ class HearingGraphIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class HearingTargetE2EOperationBinding:
+class HearingProductionOperationBinding:
     operation: HearingOperation
     command_stage_code: str
     request_stage_code: str
@@ -165,32 +165,32 @@ HEARING_WORKFLOW_STAGE_CODES: tuple[str, ...] = (
 )
 
 
-HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
-    HearingOperation, HearingTargetE2EOperationBinding
+HEARING_PRODUCTION_RUNTIME_OPERATION_BINDINGS: Mapping[
+    HearingOperation, HearingProductionOperationBinding
 ] = MappingProxyType(
     {
-        HearingOperation.INTAKE_QUESTIONS: HearingTargetE2EOperationBinding(
+        HearingOperation.INTAKE_QUESTIONS: HearingProductionOperationBinding(
             operation=HearingOperation.INTAKE_QUESTIONS,
             command_stage_code="INTAKE_QUESTIONS_GENERATING",
             request_stage_code="INTAKE_QUESTIONS",
             result_schema_version="hearing_intake_questions.v5",
             model_nodes=("hearing_intake_questions",),
         ),
-        HearingOperation.INTAKE_SYNTHESIS: HearingTargetE2EOperationBinding(
+        HearingOperation.INTAKE_SYNTHESIS: HearingProductionOperationBinding(
             operation=HearingOperation.INTAKE_SYNTHESIS,
             command_stage_code="INTAKE_SYNTHESIZING",
             request_stage_code="INTAKE_SYNTHESIS",
             result_schema_version="hearing_intake_synthesis.v5",
             model_nodes=("hearing_intake_synthesis",),
         ),
-        HearingOperation.EVIDENCE_REQUESTS: HearingTargetE2EOperationBinding(
+        HearingOperation.EVIDENCE_REQUESTS: HearingProductionOperationBinding(
             operation=HearingOperation.EVIDENCE_REQUESTS,
             command_stage_code="EVIDENCE_REQUESTS_GENERATING",
             request_stage_code="EVIDENCE_REQUESTS",
             result_schema_version="hearing_evidence_requests.v1",
             model_nodes=("hearing_evidence_requests",),
         ),
-        HearingOperation.EVIDENCE_SYNTHESIS: HearingTargetE2EOperationBinding(
+        HearingOperation.EVIDENCE_SYNTHESIS: HearingProductionOperationBinding(
             operation=HearingOperation.EVIDENCE_SYNTHESIS,
             command_stage_code="EVIDENCE_SYNTHESIZING",
             request_stage_code="EVIDENCE_SYNTHESIS",
@@ -200,21 +200,21 @@ HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
                 "hearing_evidence_synthesis",
             ),
         ),
-        HearingOperation.JUDGE_V1: HearingTargetE2EOperationBinding(
+        HearingOperation.JUDGE_V1: HearingProductionOperationBinding(
             operation=HearingOperation.JUDGE_V1,
             command_stage_code="JUDGE_V1_GENERATING",
             request_stage_code="JUDGE_V1",
             result_schema_version="hearing_judge_v1.v2",
             model_nodes=("hearing_judge_v1",),
         ),
-        HearingOperation.JURY_REVIEW: HearingTargetE2EOperationBinding(
+        HearingOperation.JURY_REVIEW: HearingProductionOperationBinding(
             operation=HearingOperation.JURY_REVIEW,
             command_stage_code="JURY_REVIEWING",
             request_stage_code="JURY_REVIEW",
             result_schema_version="hearing_jury_review.v1",
             model_nodes=("hearing_jury_review",),
         ),
-        HearingOperation.JUDGE_V2: HearingTargetE2EOperationBinding(
+        HearingOperation.JUDGE_V2: HearingProductionOperationBinding(
             operation=HearingOperation.JUDGE_V2,
             command_stage_code="JUDGE_V2_GENERATING",
             request_stage_code="JUDGE_V2",
@@ -228,19 +228,19 @@ HEARING_TARGET_E2E_OPERATION_BINDINGS: Mapping[
 if (
     len(HEARING_WORKFLOW_STAGE_CODES) != 15
     or len(set(HEARING_WORKFLOW_STAGE_CODES)) != 15
-    or set(HEARING_TARGET_E2E_OPERATION_BINDINGS) != set(HearingOperation)
+    or set(HEARING_PRODUCTION_RUNTIME_OPERATION_BINDINGS) != set(HearingOperation)
     or {
         node
-        for binding in HEARING_TARGET_E2E_OPERATION_BINDINGS.values()
+        for binding in HEARING_PRODUCTION_RUNTIME_OPERATION_BINDINGS.values()
         for node in binding.model_nodes
     }
     != set(HEARING_MODEL_NODE_PROMPTS)
     or any(
         binding.command_stage_code not in HEARING_WORKFLOW_STAGE_CODES
-        for binding in HEARING_TARGET_E2E_OPERATION_BINDINGS.values()
+        for binding in HEARING_PRODUCTION_RUNTIME_OPERATION_BINDINGS.values()
     )
 ):
-    raise RuntimeError("Hearing target-E2E operation registry is incomplete")
+    raise RuntimeError("Hearing production-runtime operation registry is incomplete")
 
 
 # Hearing graphs are proposal-only. There is no formal/domain tool in any model path.

@@ -213,12 +213,12 @@ def _candidate_execution(admission: GatewayAdmission) -> GatewayExecution:
         execution,
         fence=replace(
             execution.fence,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=f"p9act.v1.{'a' * 32}",
             room_fencing_token=7,
             command_hash="c" * 64,
             command_envelope_hash="d" * 64,
-            environment_id="target-e2e-local",
+            environment_id="production-runtime-local",
             environment_generation=1,
             tenant_surrogate=command.tenant_surrogate,
             case_id=command.case_id,
@@ -2248,7 +2248,7 @@ async def test_candidate_room_binding_uses_the_exact_intake_provider_identity() 
     executor = _ProviderCallingExecutor()
     composite_binding = ProviderRuntimeBinding(
         model_profile_id=admission.registry.binding.model_profile_id,
-        provider="target-e2e-composite",
+        provider="production-runtime-composite",
         model="room-provider-dispatch",
         allowed_nodes=frozenset({"INTAKE"}),
     )

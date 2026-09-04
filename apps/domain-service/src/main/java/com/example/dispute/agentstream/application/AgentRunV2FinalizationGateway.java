@@ -20,7 +20,7 @@ import java.util.Objects;
 @ConditionalOnBean(AgentRunV2FinalizationFactsProvider.class)
 @ConditionalOnProperty(name = "app.agent-run-v2.enabled", havingValue = "true")
 @ConditionalOnProperty(
-        name = "app.target-e2e.enabled",
+        name = "app.production-runtime.enabled",
         havingValue = "false",
         matchIfMissing = true)
 public final class AgentRunV2FinalizationGateway implements AgentRunFinalizationGateway {

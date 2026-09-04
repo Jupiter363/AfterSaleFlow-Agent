@@ -1,6 +1,6 @@
 package com.example.dispute.workflow.temporal.room.evidence;
 
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.util.List;

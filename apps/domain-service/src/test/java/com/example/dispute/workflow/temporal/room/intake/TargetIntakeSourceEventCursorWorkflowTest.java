@@ -309,7 +309,7 @@ class TargetIntakeSourceEventCursorWorkflowTest {
   @Test
   void ordinaryIntakeLaneCannotUseTheTargetSourceCursorSignal() {
     IntakeRoomStart ordinaryProfile = ordinaryStart();
-    assertThat(ordinaryProfile.targetE2eCandidate()).isFalse();
+    assertThat(ordinaryProfile.productionCandidate()).isFalse();
     IntakeRoomWorkflow ordinary = newWorkflow("ordinary", ordinaryProfile);
 
     ordinary.targetSourceEventObserved(source(1, "EVENT_ORDINARY_SOURCE_1"));
@@ -420,11 +420,11 @@ class TargetIntakeSourceEventCursorWorkflowTest {
         "target-control-build",
         "2.0.0",
         "intake-checkpoint.v2",
-        "all-rooms-prompt.target-e2e.v2",
-        "target-e2e.contract-blocked",
-        "target-e2e-intake-output.v1",
-        "all-rooms-policy.target-e2e.v1",
-        "all-rooms-guardrail.target-e2e.v1",
+        "all-rooms-prompt.production-runtime.v2",
+        "production-runtime.contract-blocked",
+        "production-runtime-intake-output.v1",
+        "all-rooms-policy.production-runtime.v1",
+        "all-rooms-guardrail.production-runtime.v1",
         "tools.none.v1",
         INITIATOR_SCOPE,
         RESPONDENT_SCOPE);

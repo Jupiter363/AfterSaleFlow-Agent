@@ -1,0 +1,5 @@
+{
+  "schema_version": "production-runtime-room-proposal-source.v2",
+  "room_type": "INTAKE",
+  "proposal": {"schema_version": "production-runtime-intake-proposal.v1", "proposal_id": "proposal-intake-001", "command_id": "command-intake-001", "logical_run_id": "run-intake-001", "attempt_id": "attempt-intake-001", "payload_schema_version": "intake-turn-proposal.v2", "payload_ref": "urn:production-runtime:proposal:intake:001", "payload_hash": "1111111111111111111111111111111111111111111111111111111111111111", "terminal_class": "COMPLETED", "formal_authority": false}
+}

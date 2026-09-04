@@ -294,14 +294,14 @@ class EvidenceV2ContractFixtureTest {
         assertThat(runtimeGate.required("temporal_evidence_allocation_allowed").asBoolean())
                 .isFalse();
         JsonNode targetProfile =
-                matrix.required("projection_compatibility").required("target_e2e_temporal");
+                matrix.required("projection_compatibility").required("production_runtime_temporal");
         assertThat(targetProfile.required("scope").asText())
-                .isEqualTo("ACTIVATION_BOUND_TARGET_E2E_ONLY");
+                .isEqualTo("ACTIVATION_BOUND_PRODUCTION_RUNTIME_ONLY");
         assertThat(targetProfile.required("writer_mode").asText()).isEqualTo("TEMPORAL");
         assertThat(targetProfile.required("graph_runtime_mode").asText())
-                .isEqualTo("TARGET_E2E_CANDIDATE");
+                .isEqualTo("PRODUCTION");
         assertThat(targetProfile.required("activation_case_scope").asText())
-                .isEqualTo("persisted_target_e2e_case_reservation");
+                .isEqualTo("persisted_production_runtime_case_reservation");
         assertThat(targetProfile.required("temporal_evidence_allocation_allowed").asBoolean())
                 .isTrue();
         assertThat(targetProfile.required("formal_graph_sink_allowed").asBoolean()).isFalse();

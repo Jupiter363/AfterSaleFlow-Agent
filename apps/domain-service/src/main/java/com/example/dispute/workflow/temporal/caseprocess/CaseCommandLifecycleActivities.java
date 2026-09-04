@@ -5,7 +5,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;

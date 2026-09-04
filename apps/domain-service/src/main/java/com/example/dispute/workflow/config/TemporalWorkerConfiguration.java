@@ -31,8 +31,8 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
-import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
-import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
+import com.example.dispute.workflow.runtime.ProductionAgentDeploymentBinding;
+import com.example.dispute.workflow.runtime.temporal.ProductionTemporalWorkerRegistration;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
@@ -113,7 +113,7 @@ public class TemporalWorkerConfiguration {
             ProcessProjectionActivitiesImpl projectionActivities,
             ObjectProvider<IntakeAuthorityWorkerRegistration> intakeAuthorityRegistrationProvider,
             ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider,
-            ObjectProvider<TargetTemporalWorkerRegistration> targetRegistrationProvider) {
+            ObjectProvider<ProductionTemporalWorkerRegistration> targetRegistrationProvider) {
         requireVersionedControlWorker(properties);
         boolean caseProcessRecoveryOnly = properties.controlRegistrationScope()
                 == TemporalWorkerProperties.ControlRegistrationScope.CASE_PROCESS_RECOVERY_ONLY;
@@ -123,7 +123,7 @@ public class TemporalWorkerConfiguration {
                         intakeEpochSelectionProperties,
                         intakeAuthorityRegistrationProvider,
                         intakeChildBridgeReadPortProvider);
-        TargetTemporalWorkerRegistration.Registration targetRegistration =
+        ProductionTemporalWorkerRegistration.Registration targetRegistration =
                 resolveTargetRegistration(targetRegistrationProvider, properties);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
@@ -162,7 +162,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<AgentRunTerminalFailureCommitter> terminalFailureCommitterProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
             ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
-            ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider,
+            ObjectProvider<ProductionAgentDeploymentBinding> targetBindingProvider,
             ObjectProvider<GraphTransportBundle> graphTransportBundleProvider) {
         requireVersionedAgentWorker(
                 properties, agentRunV2Properties, intakeEpochSelectionProperties);
@@ -205,7 +205,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
             ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
-            ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider) {
+            ObjectProvider<ProductionAgentDeploymentBinding> targetBindingProvider) {
         requireVersionedAgentWorker(
                 properties, agentRunV2Properties, intakeEpochSelectionProperties);
         requireTargetAgentDeploymentBinding(
@@ -241,7 +241,7 @@ public class TemporalWorkerConfiguration {
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
             IntakeAuthorityWorkerRegistration intakeAuthorityRegistration,
-            TargetTemporalWorkerRegistration.Registration targetRegistration) {
+            ProductionTemporalWorkerRegistration.Registration targetRegistration) {
         if (properties.controlRegistrationScope()
                 == TemporalWorkerProperties.ControlRegistrationScope.CASE_PROCESS_RECOVERY_ONLY) {
             registerCaseProcessRecoveryOnlyWorker(
@@ -350,7 +350,7 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerOptionsFactory optionsFactory,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
-            TargetTemporalWorkerRegistration.Registration targetRegistration) {
+            ProductionTemporalWorkerRegistration.Registration targetRegistration) {
         if (targetRegistration == null) {
             throw new IllegalStateException(
                     "CASE_PROCESS_RECOVERY_ONLY requires one exact target Temporal registration");
@@ -373,7 +373,7 @@ public class TemporalWorkerConfiguration {
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
             IntakeAuthorityWorkerRegistration intakeAuthorityRegistration,
-            TargetTemporalWorkerRegistration.Registration targetRegistration) {
+            ProductionTemporalWorkerRegistration.Registration targetRegistration) {
         if (targetRegistration == null) {
             throw new IllegalStateException(
                     "CASE_PROCESS_INTAKE_CONTINUATION_ONLY requires one exact target Temporal registration");
@@ -513,10 +513,10 @@ public class TemporalWorkerConfiguration {
         return IntakeAuthorityWorkerRegistration.fromReadPortProvider(readPortProvider);
     }
 
-    private static TargetTemporalWorkerRegistration.Registration resolveTargetRegistration(
-            ObjectProvider<TargetTemporalWorkerRegistration> provider,
+    private static ProductionTemporalWorkerRegistration.Registration resolveTargetRegistration(
+            ObjectProvider<ProductionTemporalWorkerRegistration> provider,
             TemporalWorkerProperties properties) {
-        List<TargetTemporalWorkerRegistration> registrations = provider.stream().toList();
+        List<ProductionTemporalWorkerRegistration> registrations = provider.stream().toList();
         if (registrations.isEmpty()) {
             return null;
         }
@@ -524,7 +524,7 @@ public class TemporalWorkerConfiguration {
             throw new IllegalStateException(
                     "target Temporal worker requires exactly one target registration");
         }
-        TargetTemporalWorkerRegistration.Registration registration =
+        ProductionTemporalWorkerRegistration.Registration registration =
                 registrations.getFirst().registration();
         if (!properties.buildId().equals(registration.controlBuildId())) {
             throw new IllegalStateException(
@@ -559,12 +559,12 @@ public class TemporalWorkerConfiguration {
     private static void requireTargetAgentDeploymentBinding(
             TemporalWorkerProperties workerProperties,
             GraphCommandClientProperties graphProperties,
-            ObjectProvider<TargetE2eAgentDeploymentBinding> bindingProvider) {
+            ObjectProvider<ProductionAgentDeploymentBinding> bindingProvider) {
         if (graphProperties.mode()
-                != GraphCommandClientProperties.Mode.TARGET_E2E_CANDIDATE) {
+                != GraphCommandClientProperties.Mode.PRODUCTION) {
             return;
         }
-        TargetE2eAgentDeploymentBinding binding =
+        ProductionAgentDeploymentBinding binding =
                 requireUnique(bindingProvider, "target AGENT deployment binding");
         binding.requireWorkerConfiguration(
                 graphProperties.activationId(), workerProperties.buildId());

@@ -68,12 +68,12 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.R
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest;
 import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
 import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
-import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger;
+import com.example.dispute.workflow.runtime.persistence.material.TargetIntakeCommandMaterialStore;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterial;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterialStore;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
@@ -132,8 +132,8 @@ class CaseProcessLedgerActivitiesImplTest {
                         mock(ProcessReconciliationIssueRepository.class),
                         mock(com.example.dispute.infrastructure.persistence.repository.AgentRunRepository.class),
                         mock(com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository.class),
-                        mock(com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.class),
-                        mock(com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.class),
+                        mock(com.example.dispute.workflow.runtime.persistence.material.TargetIntakeCommandMaterialStore.class),
+                        mock(com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.class),
                         new ObjectMapper(),
                         Clock.systemUTC());
 
@@ -307,7 +307,7 @@ class CaseProcessLedgerActivitiesImplTest {
                                     assertThat(((ApplicationFailure) failure).getType())
                                             .isEqualTo(
                                                     "TARGET_INTAKE_TERMINAL_NO_COMMIT_ACTIVATION_LEDGER_UNAVAILABLE"))
-                    .hasMessageContaining("target E2E activation ledger is unavailable");
+                    .hasMessageContaining("production runtime activation ledger is unavailable");
         }
     }
 
@@ -367,7 +367,7 @@ class CaseProcessLedgerActivitiesImplTest {
                         mock(AgentRunRepository.class),
                         mock(AgentRunAttemptRepository.class),
                         mock(TargetIntakeCommandMaterialStore.class),
-                        mock(TargetE2EActivationLedger.class),
+                        mock(ProductionActivationLedger.class),
                         new ObjectMapper(),
                         Clock.systemUTC());
         LoadSequenceRange range =
@@ -495,7 +495,7 @@ class CaseProcessLedgerActivitiesImplTest {
         AgentRunRepository runRepository = mock(AgentRunRepository.class);
         AgentRunAttemptRepository attemptRepository = mock(AgentRunAttemptRepository.class);
         TargetIntakeCommandMaterialStore materialStore = mock(TargetIntakeCommandMaterialStore.class);
-        TargetE2EActivationLedger activationLedger = mock(TargetE2EActivationLedger.class);
+        ProductionActivationLedger activationLedger = mock(ProductionActivationLedger.class);
         ObjectMapper mapper = mock(ObjectMapper.class);
 
         CaseCommandEntity command = mock(CaseCommandEntity.class);
@@ -524,8 +524,8 @@ class CaseProcessLedgerActivitiesImplTest {
 
         TargetIntakeCommandMaterialStore.MaterialSnapshot material =
                 mock(TargetIntakeCommandMaterialStore.MaterialSnapshot.class);
-        TargetE2EActivationLedger.CommandAdmission admission =
-                mock(TargetE2EActivationLedger.CommandAdmission.class);
+        ProductionActivationLedger.CommandAdmission admission =
+                mock(ProductionActivationLedger.CommandAdmission.class);
         IntakeCommandExecutionContext context = mock(IntakeCommandExecutionContext.class);
         IntakeTargetAgentRunContext target = mock(IntakeTargetAgentRunContext.class);
         ExecuteAgentRunRequest agentRequest = mock(ExecuteAgentRunRequest.class);
@@ -561,8 +561,8 @@ class CaseProcessLedgerActivitiesImplTest {
         when(agentRequest.attemptId()).thenReturn(authority.rootAttemptId());
         when(agentRequest.command()).thenReturn(graph);
 
-        TargetE2EActivationLedger.CommandAdmissionSnapshot admissionSnapshot =
-                mock(TargetE2EActivationLedger.CommandAdmissionSnapshot.class);
+        ProductionActivationLedger.CommandAdmissionSnapshot admissionSnapshot =
+                mock(ProductionActivationLedger.CommandAdmissionSnapshot.class);
         when(activationLedger.queryCommandAdmission(authority.activationId(), COMMAND_ID))
                 .thenReturn(Optional.of(admissionSnapshot));
         when(admissionSnapshot.admissionId()).thenReturn("admission-1");
@@ -1124,7 +1124,7 @@ class CaseProcessLedgerActivitiesImplTest {
         AgentRunAttemptRepository attemptRepository = mock(AgentRunAttemptRepository.class);
         TargetIntakeCommandMaterialStore materialStore =
                 mock(TargetIntakeCommandMaterialStore.class);
-        TargetE2EActivationLedger activationLedger = mock(TargetE2EActivationLedger.class);
+        ProductionActivationLedger activationLedger = mock(ProductionActivationLedger.class);
         ObjectMapper mapper = mock(ObjectMapper.class);
 
         CaseCommandEntity command = mock(CaseCommandEntity.class);
@@ -1145,8 +1145,8 @@ class CaseProcessLedgerActivitiesImplTest {
 
         TargetIntakeCommandMaterialStore.MaterialSnapshot material =
                 mock(TargetIntakeCommandMaterialStore.MaterialSnapshot.class);
-        TargetE2EActivationLedger.CommandAdmission admission =
-                mock(TargetE2EActivationLedger.CommandAdmission.class);
+        ProductionActivationLedger.CommandAdmission admission =
+                mock(ProductionActivationLedger.CommandAdmission.class);
         IntakeCommandExecutionContext context = mock(IntakeCommandExecutionContext.class);
         IntakeTargetAgentRunContext target = mock(IntakeTargetAgentRunContext.class);
         ExecuteAgentRunRequest agentRequest = mock(ExecuteAgentRunRequest.class);
@@ -1182,8 +1182,8 @@ class CaseProcessLedgerActivitiesImplTest {
         when(agentRequest.attemptId()).thenReturn(authority.rootAttemptId());
         when(agentRequest.command()).thenReturn(graph);
 
-        TargetE2EActivationLedger.CommandAdmissionSnapshot admissionSnapshot =
-                mock(TargetE2EActivationLedger.CommandAdmissionSnapshot.class);
+        ProductionActivationLedger.CommandAdmissionSnapshot admissionSnapshot =
+                mock(ProductionActivationLedger.CommandAdmissionSnapshot.class);
         when(activationLedger.queryCommandAdmission(authority.activationId(), COMMAND_ID))
                 .thenReturn(Optional.of(admissionSnapshot));
         when(admissionSnapshot.admissionId()).thenReturn("admission-finalization-rejected");
@@ -1403,7 +1403,7 @@ class CaseProcessLedgerActivitiesImplTest {
                 mock(AgentRunStreamEventRepository.class);
         TargetEvidenceCommandMaterialStore materialStore =
                 mock(TargetEvidenceCommandMaterialStore.class);
-        TargetE2EActivationLedger activationLedger = mock(TargetE2EActivationLedger.class);
+        ProductionActivationLedger activationLedger = mock(ProductionActivationLedger.class);
         ObjectMapper mapper = JsonMapper.builder().findAndAddModules().build();
 
         CaseCommandEntity command =
@@ -1418,7 +1418,7 @@ class CaseProcessLedgerActivitiesImplTest {
 
         String activationId = "p9act.v1." + "1".repeat(32);
         String activationManifestHash = "2".repeat(64);
-        var admission = mock(TargetE2EActivationLedger.CommandAdmission.class);
+        var admission = mock(ProductionActivationLedger.CommandAdmission.class);
         when(admission.activationId()).thenReturn(activationId);
         when(admission.manifestHash()).thenReturn(activationManifestHash);
         when(admission.tenantSurrogate()).thenReturn(TENANT);
@@ -1449,7 +1449,7 @@ class CaseProcessLedgerActivitiesImplTest {
         when(materialStore.readByRoute(any())).thenReturn(Optional.of(materialSnapshot));
 
         var durableAdmission =
-                mock(TargetE2EActivationLedger.CommandAdmissionSnapshot.class);
+                mock(ProductionActivationLedger.CommandAdmissionSnapshot.class);
         when(activationLedger.queryCommandAdmission(activationId, COMMAND_ID))
                 .thenReturn(Optional.of(durableAdmission));
         when(durableAdmission.admissionId()).thenReturn(materialSnapshot.admissionId());
@@ -2208,7 +2208,7 @@ class CaseProcessLedgerActivitiesImplTest {
                         source.roomEpoch(),
                         source.actorRef(),
                         new PayloadRef(
-                                "target-e2e-evidence-opening.v1",
+                                "production-runtime-evidence-opening.v1",
                                 "urn:evidence-opening:evidence-opening-successor",
                                 "e".repeat(64),
                                 64),
@@ -3009,7 +3009,7 @@ class CaseProcessLedgerActivitiesImplTest {
                 0,
                 new ActorRef("actor-evidence-terminal", ActorRole.USER, List.of("evidence:opening")),
                 new PayloadRef(
-                        "target-e2e-evidence-opening.v1",
+                        "production-runtime-evidence-opening.v1",
                         "urn:evidence-opening:" + COMMAND_ID,
                         "d".repeat(64),
                         64),

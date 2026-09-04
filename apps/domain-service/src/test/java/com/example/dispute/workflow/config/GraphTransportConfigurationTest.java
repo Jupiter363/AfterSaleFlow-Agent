@@ -204,7 +204,7 @@ class GraphTransportConfigurationTest {
                 .isEqualTo(Duration.ofMillis(5100));
         assertThat(new GraphContinuousReadinessProperties(
                         Duration.ofSeconds(25), Duration.ofSeconds(15))
-                        .settings("TARGET_E2E_CANDIDATE")
+                        .settings("PRODUCTION")
                         .freshness())
                 .isEqualTo(Duration.ofSeconds(40));
         assertThatThrownBy(() -> new GraphContinuousReadinessProperties(

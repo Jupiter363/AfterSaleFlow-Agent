@@ -52,9 +52,9 @@ from app.graph_runtime.intake_binding import (
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.result import CompletedDraft, ResultBindings
-from app.graph_runtime.target_e2e import (
-    TargetE2ERoomProposal,
-    TargetE2ERoomProposalSource,
+from app.graph_runtime.production_runtime import (
+    ProductionRoomProposal,
+    ProductionRoomProposalSource,
 )
 from app.graphs.intake.lcel import (
     INTAKE_ACTION_GATE_ACTION_STATUSES,
@@ -1329,9 +1329,9 @@ class CompiledIntakeGraphShadowExecutor:
 
     @staticmethod
     def _uses_target_reply_then_board_boundary(execution: GatewayExecution) -> bool:
-        """Select Target's reply-first stream and canonical no-preview fallback."""
+        """Select Production runtime's reply-first stream and canonical no-preview fallback."""
 
-        return execution.fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
+        return execution.fence.execution_lane is GraphGatewayMode.PRODUCTION
 
     @staticmethod
     def _context_is_respondent_opening(context: IntakeTurnContext) -> bool:
@@ -1867,7 +1867,7 @@ class CompiledIntakeGraphShadowExecutor:
         cognitive_revision: int,
         usage: Usage,
         artifact: ArtifactPointer,
-        target_proposal_source: TargetE2ERoomProposalSource | None,
+        target_proposal_source: ProductionRoomProposalSource | None,
     ) -> TerminalResultMaterializer:
         command = execution.admission.command
         invocation = command.invocation_context
@@ -1903,21 +1903,21 @@ class CompiledIntakeGraphShadowExecutor:
     def _target_proposal_source(
         execution: GatewayExecution,
         stored: StoredIntakeProposal,
-    ) -> TargetE2ERoomProposalSource | None:
+    ) -> ProductionRoomProposalSource | None:
         if execution.fence.execution_lane is GraphGatewayMode.SHADOW:
             return None
         command = execution.admission.command
-        return TargetE2ERoomProposalSource(
-            schema_version="target-e2e-room-proposal-source.v2",
+        return ProductionRoomProposalSource(
+            schema_version="production-runtime-room-proposal-source.v2",
             room_type="INTAKE",
-            proposal=TargetE2ERoomProposal(
-                schema_version="target-e2e-intake-proposal.v1",
+            proposal=ProductionRoomProposal(
+                schema_version="production-runtime-intake-proposal.v1",
                 proposal_id=f"target-proposal.{stored.sha256[:32]}",
                 command_id=command.command_id,
                 logical_run_id=command.logical_run_id,
                 attempt_id=command.attempt_id,
                 payload_schema_version=stored.schema_version,
-                payload_ref=f"urn:target-e2e:proposal:intake:{stored.sha256}",
+                payload_ref=f"urn:production-runtime:proposal:intake:{stored.sha256}",
                 payload_hash=stored.sha256,
                 terminal_class="COMPLETED",
                 formal_authority=False,

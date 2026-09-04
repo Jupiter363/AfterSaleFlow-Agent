@@ -2509,7 +2509,7 @@ def _adapt_and_normalize_generation_parts(
     IntakeCognitionDraft,
     IntakeCognitionDraft,
 ]:
-    """Adapt a governed model result and apply Target-only normalizers."""
+    """Adapt a governed model result and apply Production-only normalizers."""
 
     state = value.get("state")
     generation = value.get("generation")

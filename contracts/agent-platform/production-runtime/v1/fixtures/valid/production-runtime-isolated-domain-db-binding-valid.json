@@ -1,0 +1,11 @@
+{
+  "schema_version": "production-runtime-isolated-domain-db-binding.v1",
+  "environment_id": "p9-isolated-preprod-01",
+  "environment_generation": 7,
+  "activation_id": "p9act.v1.0123456789abcdef0123456789abcdef",
+  "binding_kind": "ISOLATED_DOMAIN_POSTGRESQL",
+  "cluster_identity": "p9-domain-cluster-01",
+  "database_identity": "p9-domain-db-01",
+  "runtime_principal_identity": "p9-java-domain-runtime-01",
+  "binding_hash": "87f99904d9a209b3829b8a58a63cd0cf1288d6d94b85c7a3cfaeb6ed38d5ae43"
+}

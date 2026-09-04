@@ -3,19 +3,23 @@
   "status": "CURRENT",
   "source": {
     "branch": "main",
-    "runtime_commit": "10526e58b954498f69bae00ea709f6f9e4981971",
-    "catalog_origin_commit": "9118f0ee16e94dec92e3c321859235cd7861afb2"
+    "behavioral_uat_commit": "10526e58b954498f69bae00ea709f6f9e4981971",
+    "production_refactor_base_commit": "265667ac9224d69a040bfa3324343f2b27cd4f67",
+    "catalog_origin_commit": "9118f0ee16e94dec92e3c321859235cd7861afb2",
+    "release_commit_binding": "IMAGE_PROVENANCE_REQUIRED"
   },
   "versioning_policy": {
     "baseline_is_release_catalog": true,
     "wire_contract_versions_are_immutable": true,
     "versionless_wire_contracts_allowed": false,
-    "renumber_existing_wire_contracts": false
+    "renumber_existing_wire_contracts": false,
+    "preproduction_identifiers_compatible": false,
+    "fresh_persistence_required": true
   },
   "graph": {
-    "key": "all-rooms.target-e2e.v2",
-    "version": "target-e2e-graph.2026-08-18.3",
-    "checkpoint_schema": "target-e2e-checkpoint.v2",
+    "key": "all-rooms.production-runtime.v2",
+    "version": "production-runtime-graph.2026-08-18.3",
+    "checkpoint_schema": "production-runtime-checkpoint.v2",
     "command_schema": "room-graph-command.v1",
     "result_schema": "room-graph-result.v1"
   },

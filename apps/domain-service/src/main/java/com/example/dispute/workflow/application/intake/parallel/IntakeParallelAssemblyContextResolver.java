@@ -2,7 +2,7 @@ package com.example.dispute.workflow.application.intake.parallel;
 
 import com.example.dispute.workflow.application.intake.parallel.IntakeParallelAssemblyStore.FrameSetAuthority;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphResultEnvelope;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphResultEnvelope;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -51,11 +51,11 @@ public interface IntakeParallelAssemblyContextResolver {
             previousDossier = previousDossier.deepCopy();
             executionProvider = bounded(
                     executionProvider,
-                    TargetE2EGraphResultEnvelope.EXECUTION_PROVIDER_MAX_LENGTH,
+                    ProductionGraphResultEnvelope.EXECUTION_PROVIDER_MAX_LENGTH,
                     "executionProvider");
             executionModel = bounded(
                     executionModel,
-                    TargetE2EGraphResultEnvelope.EXECUTION_MODEL_MAX_LENGTH,
+                    ProductionGraphResultEnvelope.EXECUTION_MODEL_MAX_LENGTH,
                     "executionModel");
             if (authorityActivationId == null
                     || !authorityActivationId.matches("p9act[.]v1[.][0-9a-f]{32}")) {

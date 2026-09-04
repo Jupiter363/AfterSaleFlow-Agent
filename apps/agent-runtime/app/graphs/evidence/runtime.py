@@ -39,7 +39,7 @@ from app.graphs.evidence.state import EvidenceGraphStateV2, new_evidence_graph_s
 EvidenceRuntimeMode = Literal[
     "DISABLED",
     "SIGNED_SYNTHETIC_SHADOW",
-    "TARGET_E2E_CANDIDATE",
+    "PRODUCTION",
 ]
 _RUNTIME_BINDING_METADATA_KEY = "evidence_runtime_binding_sha256"
 _RUNTIME_COMPLETED_AT_METADATA_KEY = "evidence_runtime_completed_at"
@@ -103,7 +103,7 @@ class EvidenceRuntimeBundle:
     graph: Any
     admission: VerifiedEvidenceAdmission
     completed_at: str
-    runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"]
+    runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW", "PRODUCTION"]
     thread_id: str
     recursion_limit: int
     runtime_binding_sha256: str
@@ -228,12 +228,12 @@ def build_evidence_runtime_bundle(
 ) -> EvidenceRuntimeBundle:
     if runtime_mode == "DISABLED":
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_DISABLED")
-    if runtime_mode not in {"SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"}:
+    if runtime_mode not in {"SIGNED_SYNTHETIC_SHADOW", "PRODUCTION"}:
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
     command, manifest = validate_verified_admission(admission)
     expected_admission_mode = (
-        "TARGET_E2E_CANDIDATE"
-        if runtime_mode == "TARGET_E2E_CANDIDATE"
+        "PRODUCTION"
+        if runtime_mode == "PRODUCTION"
         else "SHADOW"
     )
     if admission.runtime_mode != expected_admission_mode:

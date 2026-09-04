@@ -16,7 +16,7 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.RoomEpochBootstrapOutboxEntity;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.RoomEpochBootstrapOutboxRepository;
-import com.example.dispute.workflow.targete2e.temporal.room.hearing.TargetHearingProvisioningRunIds;
+import com.example.dispute.workflow.runtime.temporal.room.hearing.TargetHearingProvisioningRunIds;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import java.nio.charset.StandardCharsets;

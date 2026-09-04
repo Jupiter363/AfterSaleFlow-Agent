@@ -1,10 +1,10 @@
 # 本地部署与联调
 
 补充说明：[Temporal](temporal.md)、[Langfuse](langfuse.md)、
-[隔离 Target E2E](target-e2e.md)。
+[Production Runtime 隔离 UAT](production-runtime-uat.md)。
 
-当前应用候选固定为 `all-rooms.target-e2e.v2` /
-`target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`，模型固定为
+当前生产应用身份固定为 `all-rooms.production-runtime.v2` /
+`production-runtime-graph.2026-08-18.3` / `production-runtime-checkpoint.v2`，模型固定为
 `qwen3.8-flash`（thinking 关闭、strict JSON Schema）。最近的完整浏览器结果见
 [当前 UAT 基线](../release/current-uat-baseline.md)。这些应用身份不会授权脚本改变
 Temporal、PostgreSQL 或其他核心组件版本。

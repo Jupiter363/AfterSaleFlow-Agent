@@ -16,7 +16,7 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.Exe
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -125,7 +125,7 @@ class EvidenceRoomWorkflowTest {
     EvidenceRoomStart decoded = mapper.treeToValue(legacyPayload, EvidenceRoomStart.class);
 
     assertThat(decoded.executionLane()).isEqualTo(ExecutionLane.LEGACY);
-    assertThat(decoded.targetE2eCandidate()).isFalse();
+    assertThat(decoded.productionCandidate()).isFalse();
     assertThat(decoded.projectionRef()).isNull();
     assertThat(decoded.projectionSha256()).isNull();
     assertThat(legacyPayload.has("projectionRef")).isFalse();
@@ -154,8 +154,8 @@ class EvidenceRoomWorkflowTest {
             1,
             4,
             6,
-            "target-e2e-evidence-build",
-            ExecutionLane.TARGET_E2E_CANDIDATE,
+            "production-runtime-evidence-build",
+            ExecutionLane.PRODUCTION,
             projectionRef,
             projectionSha256);
     StartedWorkflow started = start("freeze-bound-snapshot", freezeBound);
@@ -190,7 +190,7 @@ class EvidenceRoomWorkflowTest {
             1,
             4,
             6,
-            "target-e2e-looking-but-legacy");
+            "production-runtime-looking-but-legacy");
     StartedWorkflow started = start("legacy-target-looking-build", legacy);
 
     started.workflow().partyCompleted(signal(INITIATOR, "LEGACY_PREFIX_I", 1));

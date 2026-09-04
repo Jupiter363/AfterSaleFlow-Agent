@@ -30,7 +30,7 @@ from app.api.intake_parallel_stream import (
 )
 from app.api.graph_reconciliation_service import (
     GraphReconciliationService,
-    TargetE2EReconciliationArtifacts,
+    ProductionReconciliationArtifacts,
 )
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import (
@@ -65,11 +65,11 @@ from app.graphs.intake.errors import IntakeGraphContractError
 from app.harness.prompt_composer import PromptResourceError
 from app.llm import AgentOutputSchemaError
 from app.model_runtime.transports import ModelTransportOutputError
-from app.graph_runtime.target_e2e import (
-    TARGET_E2E_COMMAND_PATH,
-    TargetE2EGraphCommandEnvelope,
-    TargetE2ERoomProposalSource,
-    VerifiedTargetE2EInvocation,
+from app.graph_runtime.production_runtime import (
+    PRODUCTION_RUNTIME_COMMAND_PATH,
+    ProductionGraphCommandEnvelope,
+    ProductionRoomProposalSource,
+    VerifiedProductionInvocation,
 )
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
@@ -87,8 +87,8 @@ GRAPH_RECONCILE_RESPONSE_SCHEMA = "graph-reconcile-response.schema.json"
 GRAPH_COMMAND_MAX_BYTES = 65_536
 GRAPH_STREAM_PATH = "/internal/graphs/commands/stream"
 GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
-TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
-TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
+PRODUCTION_RUNTIME_RECONCILE_PATH = "/internal/graphs/production-runtime/commands/reconcile"
+PRODUCTION_RUNTIME_PROPOSAL_SOURCE_PATH = "/internal/graphs/production-runtime/commands/proposal-source"
 _PARALLEL_PHASE_HEADER = "x-intake-parallel-phase"
 _PARALLEL_ADMISSION_HEADER = "x-intake-parallel-admission"
 _PARALLEL_FAILURE_HEADER = "x-intake-parallel-failure-code"
@@ -125,7 +125,7 @@ _NO_STORE_HEADERS: Mapping[str, str] = {
     "X-Content-Type-Options": "nosniff",
 }
 LOGGER = logging.getLogger(__name__)
-_FORBIDDEN_BOOTSTRAP_HEADER = "x-aftersaleflow-target-e2e-activation"
+_FORBIDDEN_BOOTSTRAP_HEADER = "x-aftersaleflow-production-runtime-activation"
 _TARGET_RESULT_REF_HEADER = "x-graph-result-ref"
 _TARGET_PROPOSAL_HASH_HEADER = "x-graph-proposal-hash"
 
@@ -170,33 +170,33 @@ class ReconciliationEnvelopeVerifierPort(Protocol):
     ) -> VerifiedReconciliation: ...
 
 
-class TargetE2EInvocationEnvelopeVerifierPort(Protocol):
+class ProductionInvocationEnvelopeVerifierPort(Protocol):
     def verify_envelope(
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
-    ) -> VerifiedTargetE2EInvocation: ...
+    ) -> VerifiedProductionInvocation: ...
 
     def verify_envelope_for_reconciliation(
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
-    ) -> VerifiedTargetE2EInvocation: ...
+    ) -> VerifiedProductionInvocation: ...
 
     def verify_parallel_envelope(
         self,
         *,
         token: str,
-        envelope: TargetE2EGraphCommandEnvelope,
+        envelope: ProductionGraphCommandEnvelope,
         transport_identity: TransportIdentity,
         phase: str,
         admission_receipt_sha256: str | None,
         failure_code: str | None = None,
-    ) -> VerifiedTargetE2EInvocation: ...
+    ) -> VerifiedProductionInvocation: ...
 
 
 class GraphCommandStreamService(Protocol):
@@ -240,7 +240,7 @@ class GraphCommandEndpointDependencies:
     thread_identity_resolver: TrustedThreadIdentityResolver
     stream_service: GraphCommandStreamService
     ready: Callable[[], bool]
-    target_e2e_envelope_verifier: TargetE2EInvocationEnvelopeVerifierPort | None = None
+    production_runtime_envelope_verifier: ProductionInvocationEnvelopeVerifierPort | None = None
     parallel_intake_stream_service: ParallelIntakeFrameStreamService | None = None
 
 
@@ -253,8 +253,8 @@ class GraphReconciliationEndpointDependencies:
     thread_identity_resolver: TrustedReconciliationThreadIdentityResolver
     reconciliation_service: GraphReconciliationService
     ready: Callable[[], bool]
-    target_e2e_envelope_verifier: TargetE2EInvocationEnvelopeVerifierPort | None = None
-    target_e2e_thread_identity_resolver: TrustedThreadIdentityResolver | None = None
+    production_runtime_envelope_verifier: ProductionInvocationEnvelopeVerifierPort | None = None
+    production_runtime_thread_identity_resolver: TrustedThreadIdentityResolver | None = None
 
 
 class AgentStreamProtocolError(RuntimeError):
@@ -321,7 +321,7 @@ def create_graph_commands_router(
         if dependencies.mode != "SHADOW":
             return _error_response(503, GraphGatewayDisabledError.code, False)
         if request.headers.get(_FORBIDDEN_BOOTSTRAP_HEADER) is not None:
-            return _error_response(400, "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN", False)
+            return _error_response(400, "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN", False)
         try:
             ready = dependencies.ready()
         except Exception:
@@ -439,15 +439,15 @@ def create_graph_commands_router(
             },
         )
 
-    @router.post(TARGET_E2E_COMMAND_PATH, response_model=None)
-    async def stream_target_e2e_command(request: Request) -> JSONResponse | StreamingResponse:
-        if dependencies.mode != "TARGET_E2E_CANDIDATE":
+    @router.post(PRODUCTION_RUNTIME_COMMAND_PATH, response_model=None)
+    async def stream_production_runtime_command(request: Request) -> JSONResponse | StreamingResponse:
+        if dependencies.mode != "PRODUCTION":
             return _error_response(503, GraphGatewayDisabledError.code, False)
         if request.headers.get(_FORBIDDEN_BOOTSTRAP_HEADER) is not None:
-            return _error_response(400, "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN", False)
-        verifier = dependencies.target_e2e_envelope_verifier
+            return _error_response(400, "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN", False)
+        verifier = dependencies.production_runtime_envelope_verifier
         if verifier is None:
-            return _error_response(503, "TARGET_E2E_VERIFIER_NOT_CONFIGURED", False)
+            return _error_response(503, "PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED", False)
         try:
             ready = dependencies.ready()
         except Exception:
@@ -468,18 +468,18 @@ def create_graph_commands_router(
         except InvocationEnvelopeError as error:
             return _error_response(401, error.code, False)
         except Exception as error:
-            _log_safe_failure("target-E2E transport identity resolution", error)
+            _log_safe_failure("production-runtime transport identity resolution", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
 
         try:
             body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
-            envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
+            envelope = ProductionGraphCommandEnvelope.model_validate(json.loads(body_text))
         except _BodyTooLarge:
             return _error_response(413, "GRAPH_COMMAND_TOO_LARGE", False)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            return _error_response(400, "TARGET_E2E_COMMAND_ENVELOPE_REJECTED", False)
+            return _error_response(400, "PRODUCTION_RUNTIME_COMMAND_ENVELOPE_REJECTED", False)
         except Exception as error:
-            _log_safe_failure("target-E2E command envelope decoding", error)
+            _log_safe_failure("production-runtime command envelope decoding", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
 
         parallel_phase: str | None = None
@@ -497,18 +497,18 @@ def create_graph_commands_router(
                     "TERMINATE",
                 }:
                     raise InvocationEnvelopeError(
-                        "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                        "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                     )
                 parallel_phase = phase_values[0]
                 if parallel_phase == "PREPARE":
                     if admission_values or failure_values:
                         raise InvocationEnvelopeError(
-                            "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                            "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                         )
                 else:
                     if len(admission_values) != 1:
                         raise InvocationEnvelopeError(
-                            "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                            "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                         )
                     parallel_receipt = decode_parallel_admission_receipt_header(
                         admission_values[0]
@@ -516,7 +516,7 @@ def create_graph_commands_router(
                     if parallel_phase in {"EXECUTE", "ABANDON"}:
                         if failure_values:
                             raise InvocationEnvelopeError(
-                                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                                "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                             )
                     else:
                         if (
@@ -527,7 +527,7 @@ def create_graph_commands_router(
                             is None
                         ):
                             raise InvocationEnvelopeError(
-                                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                                "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                             )
                         parallel_failure_code = failure_values[0]
                 verification_arguments: dict[str, Any] = {
@@ -549,25 +549,25 @@ def create_graph_commands_router(
                     _PARALLEL_ADMISSION_HEADER
                 ) or request.headers.getlist(_PARALLEL_FAILURE_HEADER):
                     raise InvocationEnvelopeError(
-                        "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED"
+                        "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED"
                     )
                 verified = verifier.verify_envelope(
                     token=token,
                     envelope=envelope,
                     transport_identity=transport_identity,
                 )
-            if not isinstance(verified, VerifiedTargetE2EInvocation):
-                raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+            if not isinstance(verified, VerifiedProductionInvocation):
+                raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         except InvocationEnvelopeError as error:
             return _error_response(401, error.code, False)
         except ParallelFrameStreamProtocolError:
             return _error_response(
                 401,
-                "TARGET_E2E_PARALLEL_DELIVERY_BINDING_REJECTED",
+                "PRODUCTION_RUNTIME_PARALLEL_DELIVERY_BINDING_REJECTED",
                 False,
             )
         except Exception as error:
-            _log_safe_failure("target-E2E invocation envelope verification", error)
+            _log_safe_failure("production-runtime invocation envelope verification", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
 
         command = envelope.command
@@ -726,7 +726,7 @@ def create_graph_commands_router(
                 await _close_iterator_safely(iterator)
             if parallel_opened is not None:
                 await _close_iterator_safely(parallel_opened.events)
-            _log_safe_failure("target-E2E graph stream startup protocol", error)
+            _log_safe_failure("production-runtime graph stream startup protocol", error)
             return _error_response(
                 502,
                 _public_intake_contract_error_code(error)
@@ -740,9 +740,9 @@ def create_graph_commands_router(
                 await _close_iterator_safely(parallel_opened.events)
             persistence_error = normalize_transient_persistence_error(error)
             if persistence_error is not None:
-                _log_safe_failure("target-E2E graph stream startup persistence", error)
+                _log_safe_failure("production-runtime graph stream startup persistence", error)
                 return _graph_runtime_error(persistence_error)
-            _log_safe_failure("target-E2E graph stream startup", error)
+            _log_safe_failure("production-runtime graph stream startup", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
         except BaseException:
             if iterator is not None:
@@ -958,16 +958,16 @@ def create_graph_reconciliation_router(
             headers=dict(_NO_STORE_HEADERS),
         )
 
-    @router.post(TARGET_E2E_RECONCILE_PATH, response_model=None)
-    async def reconcile_target_e2e_command(request: Request) -> JSONResponse:
-        if dependencies.mode != "TARGET_E2E_CANDIDATE":
+    @router.post(PRODUCTION_RUNTIME_RECONCILE_PATH, response_model=None)
+    async def reconcile_production_runtime_command(request: Request) -> JSONResponse:
+        if dependencies.mode != "PRODUCTION":
             return _error_response(503, GraphGatewayDisabledError.code, False)
         if request.headers.get(_FORBIDDEN_BOOTSTRAP_HEADER) is not None:
-            return _error_response(400, "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN", False)
-        verifier = dependencies.target_e2e_envelope_verifier
-        resolver = dependencies.target_e2e_thread_identity_resolver
+            return _error_response(400, "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN", False)
+        verifier = dependencies.production_runtime_envelope_verifier
+        resolver = dependencies.production_runtime_thread_identity_resolver
         if verifier is None or resolver is None:
-            return _error_response(503, "TARGET_E2E_VERIFIER_NOT_CONFIGURED", False)
+            return _error_response(503, "PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED", False)
         # This route can only recover the immutable result of an already-admitted command.
         # Global readiness gates new execution; it must not strand a durable result during a
         # transient admission outage. Verification and exact durable lookup remain fail closed.
@@ -982,22 +982,22 @@ def create_graph_reconciliation_router(
             token = extract_bearer_token(authorization[0] if authorization else None)
             transport_identity = dependencies.transport_identity_resolver.resolve(request.scope)
             body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
-            envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
+            envelope = ProductionGraphCommandEnvelope.model_validate(json.loads(body_text))
             verified = verifier.verify_envelope_for_reconciliation(
                 token=token,
                 envelope=envelope,
                 transport_identity=transport_identity,
             )
-            if not isinstance(verified, VerifiedTargetE2EInvocation):
-                raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+            if not isinstance(verified, VerifiedProductionInvocation):
+                raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         except _BodyTooLarge:
             return _error_response(413, "GRAPH_COMMAND_TOO_LARGE", False)
         except InvocationEnvelopeError as error:
             return _error_response(401, error.code, False)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            return _error_response(400, "TARGET_E2E_COMMAND_ENVELOPE_REJECTED", False)
+            return _error_response(400, "PRODUCTION_RUNTIME_COMMAND_ENVELOPE_REJECTED", False)
         except Exception as error:
-            _log_safe_failure("target-E2E reconciliation verification", error)
+            _log_safe_failure("production-runtime reconciliation verification", error)
             return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
         try:
             expected_thread = await resolver.resolve(
@@ -1006,12 +1006,12 @@ def create_graph_reconciliation_router(
             )
             if not isinstance(expected_thread, ThreadIdentity):
                 raise TypeError("trusted resolver returned an invalid thread identity")
-            result = await dependencies.reconciliation_service.reconcile_target_e2e(
+            result = await dependencies.reconciliation_service.reconcile_production_runtime(
                 command=envelope.command,
                 verified_invocation=verified,
                 expected_thread=expected_thread,
             )
-            if not isinstance(result, TargetE2EReconciliationArtifacts):
+            if not isinstance(result, ProductionReconciliationArtifacts):
                 raise TypeError("candidate reconciliation returned invalid durable artifacts")
             return JSONResponse(
                 status_code=200,
@@ -1026,21 +1026,21 @@ def create_graph_reconciliation_router(
         except GraphRuntimeError as error:
             return _graph_runtime_error(error)
         except (TypeError, ValueError):
-            return _error_response(502, "TARGET_E2E_RESULT_ENVELOPE_REJECTED", False)
+            return _error_response(502, "PRODUCTION_RUNTIME_RESULT_ENVELOPE_REJECTED", False)
         except Exception as error:
-            _log_safe_failure("target-E2E reconciliation", error)
+            _log_safe_failure("production-runtime reconciliation", error)
             return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
 
-    @router.post(TARGET_E2E_PROPOSAL_SOURCE_PATH, response_model=None)
-    async def retrieve_target_e2e_proposal_source(request: Request) -> JSONResponse:
-        if dependencies.mode != "TARGET_E2E_CANDIDATE":
+    @router.post(PRODUCTION_RUNTIME_PROPOSAL_SOURCE_PATH, response_model=None)
+    async def retrieve_production_runtime_proposal_source(request: Request) -> JSONResponse:
+        if dependencies.mode != "PRODUCTION":
             return _error_response(503, GraphGatewayDisabledError.code, False)
         if request.headers.get(_FORBIDDEN_BOOTSTRAP_HEADER) is not None:
-            return _error_response(400, "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN", False)
-        verifier = dependencies.target_e2e_envelope_verifier
-        resolver = dependencies.target_e2e_thread_identity_resolver
+            return _error_response(400, "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN", False)
+        verifier = dependencies.production_runtime_envelope_verifier
+        resolver = dependencies.production_runtime_thread_identity_resolver
         if verifier is None or resolver is None:
-            return _error_response(503, "TARGET_E2E_VERIFIER_NOT_CONFIGURED", False)
+            return _error_response(503, "PRODUCTION_RUNTIME_VERIFIER_NOT_CONFIGURED", False)
         try:
             if not dependencies.ready():
                 return _error_response(503, "GRAPH_GATEWAY_NOT_READY", True)
@@ -1055,7 +1055,7 @@ def create_graph_reconciliation_router(
         except ValueError:
             return _error_response(
                 400,
-                "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED",
+                "PRODUCTION_RUNTIME_PROPOSAL_SOURCE_HEADERS_REJECTED",
                 False,
             )
         try:
@@ -1065,22 +1065,22 @@ def create_graph_reconciliation_router(
             token = extract_bearer_token(authorization[0] if authorization else None)
             transport_identity = dependencies.transport_identity_resolver.resolve(request.scope)
             body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
-            envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
+            envelope = ProductionGraphCommandEnvelope.model_validate(json.loads(body_text))
             verified = verifier.verify_envelope_for_reconciliation(
                 token=token,
                 envelope=envelope,
                 transport_identity=transport_identity,
             )
-            if not isinstance(verified, VerifiedTargetE2EInvocation):
-                raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+            if not isinstance(verified, VerifiedProductionInvocation):
+                raise InvocationEnvelopeError("PRODUCTION_RUNTIME_CREDENTIAL_TYPE_REJECTED")
         except _BodyTooLarge:
             return _error_response(413, "GRAPH_COMMAND_TOO_LARGE", False)
         except InvocationEnvelopeError as error:
             return _error_response(401, error.code, False)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            return _error_response(400, "TARGET_E2E_COMMAND_ENVELOPE_REJECTED", False)
+            return _error_response(400, "PRODUCTION_RUNTIME_COMMAND_ENVELOPE_REJECTED", False)
         except Exception as error:
-            _log_safe_failure("target-E2E proposal-source verification", error)
+            _log_safe_failure("production-runtime proposal-source verification", error)
             return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
         try:
             expected_thread = await resolver.resolve(
@@ -1090,7 +1090,7 @@ def create_graph_reconciliation_router(
             if not isinstance(expected_thread, ThreadIdentity):
                 raise TypeError("trusted resolver returned an invalid thread identity")
             proposal_source = await (
-                dependencies.reconciliation_service.retrieve_target_e2e_proposal_source(
+                dependencies.reconciliation_service.retrieve_production_runtime_proposal_source(
                     command=envelope.command,
                     verified_invocation=verified,
                     expected_thread=expected_thread,
@@ -1098,7 +1098,7 @@ def create_graph_reconciliation_router(
                     expected_proposal_hash=expected_proposal_hash,
                 )
             )
-            if not isinstance(proposal_source, TargetE2ERoomProposalSource):
+            if not isinstance(proposal_source, ProductionRoomProposalSource):
                 raise TypeError("candidate reconciliation returned an invalid proposal source")
             return JSONResponse(
                 status_code=200,
@@ -1112,9 +1112,9 @@ def create_graph_reconciliation_router(
         except GraphRuntimeError as error:
             return _graph_runtime_error(error)
         except (TypeError, ValueError):
-            return _error_response(502, "TARGET_E2E_PROPOSAL_SOURCE_REJECTED", False)
+            return _error_response(502, "PRODUCTION_RUNTIME_PROPOSAL_SOURCE_REJECTED", False)
         except Exception as error:
-            _log_safe_failure("target-E2E proposal-source retrieval", error)
+            _log_safe_failure("production-runtime proposal-source retrieval", error)
             return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
 
     return router
@@ -1124,7 +1124,7 @@ def _target_proposal_selector(request: Request) -> tuple[str, str]:
     result_refs = request.headers.getlist(_TARGET_RESULT_REF_HEADER)
     proposal_hashes = request.headers.getlist(_TARGET_PROPOSAL_HASH_HEADER)
     if len(result_refs) != 1 or len(proposal_hashes) != 1:
-        raise ValueError("target-E2E proposal selector headers must be singular")
+        raise ValueError("production-runtime proposal selector headers must be singular")
     result_ref = result_refs[0]
     proposal_hash = proposal_hashes[0]
     if (
@@ -1132,7 +1132,7 @@ def _target_proposal_selector(request: Request) -> tuple[str, str]:
         or len(result_ref) > 512
         or _TARGET_PROPOSAL_HASH.fullmatch(proposal_hash) is None
     ):
-        raise ValueError("target-E2E proposal selector headers are malformed")
+        raise ValueError("production-runtime proposal selector headers are malformed")
     return result_ref, proposal_hash
 
 

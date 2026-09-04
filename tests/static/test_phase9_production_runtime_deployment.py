@@ -1,0 +1,1324 @@
+from __future__ import annotations
+
+import copy
+import datetime as dt
+import importlib
+import json
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+
+ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_PATH = ROOT / "infra/compose/production-runtime-uat.yml"
+DEPLOY = ROOT / "infra" / "environments" / "production-runtime-uat"
+SCRIPTS = ROOT / "tools" / "uat" / "production-runtime"
+LOCAL_SOURCE_LAUNCHER = ROOT / ".local-dev" / "launch-source.ps1"
+sys.path.insert(0, str(SCRIPTS))
+common = importlib.import_module("common")
+
+
+def _read_optional_local_source_launcher() -> str:
+    if not LOCAL_SOURCE_LAUNCHER.is_file():
+        pytest.skip("local source launcher is an operator artifact, not production source")
+    return LOCAL_SOURCE_LAUNCHER.read_text(encoding="utf-8")
+
+
+ledger = importlib.import_module("ledger")
+assertion = importlib.import_module("assert_evidence")
+readiness = importlib.import_module("readiness")
+preflight = importlib.import_module("preflight")
+
+
+def _compose() -> dict[str, Any]:
+    value = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(value, dict)
+    return value
+
+
+def _networks(service: dict[str, Any]) -> set[str]:
+    value = service.get("networks", [])
+    return set(value if isinstance(value, list) else value)
+
+
+def _volume_sources(service: dict[str, Any]) -> set[str]:
+    return {
+        str(value.get("source"))
+        for value in service.get("volumes", [])
+        if isinstance(value, dict)
+    }
+
+
+def _write_key_pair(directory: Path, name: str) -> tuple[Any, Any, Path, Path]:
+    private = ec.generate_private_key(ec.SECP256R1())
+    public = private.public_key()
+    private_path = directory / f"{name}.private.pem"
+    public_path = directory / f"{name}.public.pem"
+    private_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    public_path.write_bytes(
+        public.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    return private, public, private_path, public_path
+
+
+def _image_lock(candidate: str = "b" * 40) -> dict[str, Any]:
+    images: dict[str, Any] = {}
+    for index, key in enumerate(common.IMAGE_KEYS, 1):
+        manifest = f"sha256:{index:064x}"
+        images[key] = {
+            "reference": f"registry.invalid/production-runtime/{key}@{manifest}",
+            "manifest_digest": manifest,
+            "config_digest": f"sha256:{index + 100:064x}",
+            "layer_digests": [f"sha256:{index + 200:064x}"],
+            "source_revision": candidate
+            if key in common.APPLICATION_IMAGE_KEYS
+            else f"upstream-{index}",
+            "build_id": f"build-{key}-{index}",
+        }
+    return common.seal_self_hash(
+        {
+            "schema_version": "production-runtime-image-lock.v2",
+            "candidate_sha": candidate,
+            "source_revision": candidate,
+            "build_provenance": {
+                "builder_id": "trusted-builder-01",
+                "invocation_id": "build-invocation-01",
+                "source_tree_sha256": "sha256:" + "c" * 64,
+                "built_at": "2026-07-27T10:00:00+00:00",
+                "attestation_type": "SLSA_PROVENANCE_V1",
+                "attestation_digest": "sha256:" + "d" * 64,
+            },
+            "images": images,
+        }
+    )
+
+
+def _run_context(now: dt.datetime) -> dict[str, Any]:
+    return common.seal_self_hash(
+        {
+            "schema_version": "production-runtime-run-context.v2",
+            "runtime_projection": {
+                "schemaVersion": "production-runtime-context.v1",
+                "executionLane": "PRODUCTION",
+                "activationId": "p9act.v1." + "a" * 32,
+                "activationManifestHash": "a" * 64,
+                "environmentId": "p9-isolated-run001",
+                "environmentGeneration": 7,
+                "candidateSha": "b" * 40,
+                "issuedAt": (now - dt.timedelta(minutes=1)).isoformat(),
+                "expiresAt": (now + dt.timedelta(minutes=20)).isoformat(),
+                "runNonce": "p9-nonce-" + "c" * 32,
+                "tenantSurrogate": "tenant-run001",
+                "caseScope": {
+                    "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
+                    "caseIdPrefix": "CASE_P9_SYNTHETIC_",
+                    "maxCases": 4,
+                    "fixtureSetId": "p9-synthetic-all-rooms-001",
+                    "fixtureSetHash": "d" * 64,
+                    "containsRealCaseOrPartyData": False,
+                    "externalEffectsAllowed": False,
+                },
+                "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
+                "composeProject": "aflow-production-runtime-p9-run001",
+                "temporalNamespace": "after-sale-flow-p9-p9-run001",
+                "buildBindings": {
+                    "caseBuildId": "p9-case-bbbbbbbb",
+                    "controlBuildId": "p9-control-bbbbbbbb",
+                    "agentBuildId": "p9-agent-bbbbbbbb",
+                },
+                "imageDigests": {
+                    "javaApi": "sha256:" + "1" * 64,
+                    "temporalControlWorker": "sha256:" + "2" * 64,
+                    "temporalAgentWorker": "sha256:" + "3" * 64,
+                    "pythonAgent": "sha256:" + "4" * 64,
+                    "frontend": "sha256:" + "5" * 64,
+                },
+                "databaseIdentities": {
+                    "domain": {
+                        "service": "domain-db",
+                        "database": "production_domain",
+                        "schema": "public",
+                        "expectedUser": "domain_app",
+                    },
+                    "graph": {
+                        "service": "graph-db",
+                        "database": "production_graph",
+                        "schema": "graph_runtime",
+                        "runtimeUser": "graph_runtime",
+                        "environmentGeneration": 7,
+                        "restoreVerificationHash": "e" * 64,
+                    },
+                },
+                "trustedSigningKeyIds": ["p9-java-finalizer-01"],
+                "perCommandManifestAllowed": False,
+            },
+            "executor_bindings": [
+                {
+                    "graph_key": "all-rooms.production-runtime.v2",
+                    "graph_version": "production-runtime-graph.2026-08-18.3",
+                    "checkpoint_schema_version": "production-runtime-checkpoint.v2",
+                    "state_schema_version": "production-runtime-graph-state.v1",
+                    "state_schema_hash": "7" * 64,
+                    "command_schema_version": "room-graph-command.v1",
+                    "result_schema_version": "room-graph-result.v1",
+                    "agent_profile_id": "all-rooms-agent.production-runtime.v1",
+                    "prompt_version": "all-rooms-prompt.production-runtime.v2",
+                    "model_profile_id": "production-runtime.contract-blocked",
+                    "output_schema_version": "production-runtime-room-proposal-source.v2",
+                    "policy_version": "all-rooms-policy.production-runtime.v1",
+                    "guardrail_version": "all-rooms-guardrail.production-runtime.v1",
+                    "tool_policy_version": "tools.none.v1",
+                    "binding_hash": "f" * 64,
+                    "code_build_id": "p9-graph-bbbbbbbb",
+                    "allowed_room_types": [
+                        "INTAKE",
+                        "EVIDENCE",
+                        "HEARING",
+                        "REVIEW",
+                    ],
+                    "allowed_stage_codes": [
+                        "INTAKE_MESSAGE",
+                        "EVIDENCE_SEAL",
+                        "INTAKE_QUESTIONS_GENERATING",
+                        "INTAKE_SYNTHESIZING",
+                        "EVIDENCE_REQUESTS_GENERATING",
+                        "EVIDENCE_SYNTHESIZING",
+                        "JUDGE_V1_GENERATING",
+                        "JURY_REVIEWING",
+                        "JUDGE_V2_GENERATING",
+                        "REVIEW_OUTCOME",
+                    ],
+                }
+            ],
+            "current_shadow_binding": {},
+            "activation_manifest_hash": "a" * 64,
+            "image_lock_hash": "1" * 64,
+            "image_lock_path": "/external/image-lock.snapshot.json",
+            "resources": common.expected_resource_names("p9-run001"),
+            "mtls": {
+                "ca_certificate_sha256": "2" * 64,
+                "client_certificate_sha256": "3" * 64,
+                "expected_spiffe_id": "spiffe://after-sale-flow/java-api-service",
+            },
+            "jwks_sha256": "4" * 64,
+            "ledger_public_key_sha256": "5" * 64,
+            "lock_nonce": "6" * 64,
+        }
+    )
+
+
+def _valid_evidence(
+    run_context: dict[str, Any], measurement_hash: str
+) -> dict[str, Any]:
+    projection = run_context["runtime_projection"]
+    digest = "a" * 64
+    rooms = []
+    runs = []
+    for index, room_type in enumerate(("INTAKE", "EVIDENCE", "HEARING", "REVIEW"), 1):
+        run_id = f"temporal-run-{index}"
+        runs.append(
+            {
+                "run_id": run_id,
+                "room_type": room_type,
+                "allocation": "TEMPORAL",
+                "protocol": "V3",
+                "execution_engine": "TEMPORAL_ACTIVITY",
+                "execution_lane": "PRODUCTION",
+                "shadow": False,
+            }
+        )
+        rooms.append(
+            {
+                "room_type": room_type,
+                "allocation": "TEMPORAL",
+                "protocol": "V3",
+                "execution_engine": "TEMPORAL_ACTIVITY",
+                "execution_lane": "PRODUCTION",
+                "temporal_run_id": run_id,
+                "room_fencing_token": index,
+                "graph_checkpoint_id": f"checkpoint-{index}",
+                "graph_checkpoint_hash": digest,
+                "graph_result_hash": digest,
+                "proposal_hash": digest,
+                "result_envelope_hash": digest,
+                "graph_output_authority": "PROPOSAL_ONLY",
+                "agent_run_manifest_hash": digest,
+                "isolated_domain_db_binding_hash": digest,
+                "java_final_receipt_id": f"receipt-{index}",
+                "java_final_receipt_hash": digest,
+                "java_writer": "JAVA_FINALIZER_ONLY",
+                "domain_commit_status": "COMMITTED",
+                "completed_at": f"2026-07-27T10:0{index}:00+00:00",
+            }
+        )
+    return {
+        "schema_version": "target-architecture-e2e-evidence.v2",
+        "candidate_sha": projection["candidateSha"],
+        "activation_id": projection["activationId"],
+        "environment_generation": projection["environmentGeneration"],
+        "compose_project": projection["composeProject"],
+        "temporal_namespace": projection["temporalNamespace"],
+        "database_identities": projection["databaseIdentities"],
+        "case_id": "CASE_P9_SYNTHETIC_0001",
+        "run_nonce": projection["runNonce"],
+        "run_context_hash": run_context["self_hash"],
+        "runtime_measurement_hash": measurement_hash,
+        "inventory_complete": True,
+        "legacy_run_count": 0,
+        "shadow_run_count": 0,
+        "infra_only": False,
+        "runs": runs,
+        "rooms": rooms,
+        "activation_receipt": {
+            "activation_id": projection["activationId"],
+            "state": "ACTIVE",
+            "consumed_at": "2026-07-27T10:00:00+00:00",
+            "manifest_hash": digest,
+        },
+    }
+
+
+def _java_jws(
+    private: Any,
+    run_context: dict[str, Any],
+    evidence: dict[str, Any],
+    now: dt.datetime,
+) -> str:
+    epoch = int(now.timestamp())
+    projection = run_context["runtime_projection"]
+    return ledger.sign_compact_jws(
+        {
+            "iss": "java-finalizer",
+            "aud": "production-runtime-evidence-harness",
+            "iat": epoch - 1,
+            "exp": epoch + 120,
+            "jti": f"{projection['runNonce']}:CASE_P9_SYNTHETIC_0001",
+            "schema_version": "production-runtime-java-evidence-attestation.v1",
+            "evidence": evidence,
+        },
+        private,
+        key_id="p9-java-finalizer-01",
+        typ="production-runtime-final-evidence+jwt",
+    )
+
+
+def test_compose_is_host_locked_run_scoped_and_has_no_baseline_port_overlap() -> None:
+    compose = _compose()
+    assert (
+        compose["name"]
+        == "${PRODUCTION_RUNTIME_PROJECT_NAME:?provision a host-locked production runtime run first}"
+    )
+    assert compose["services"]["gateway"]["ports"] == [
+        "127.0.0.1:${PRODUCTION_RUNTIME_GATEWAY_PORT:-25180}:8080"
+    ]
+    assert all(
+        not service.get("ports")
+        for name, service in compose["services"].items()
+        if name != "gateway"
+    )
+    assert set(compose["services"]) == set(common.EXPECTED_SERVICES)
+    for service in compose["services"].values():
+        labels = service["labels"]
+        assert (
+            labels["production-runtime.after-sale-flow.dev/lock-nonce"]
+            == "${PRODUCTION_RUNTIME_LOCK_NONCE:?}"
+        )
+        assert labels["production-runtime.after-sale-flow.dev/production-lane-runnable"] == "false"
+    for collection in (compose["networks"], compose["volumes"]):
+        for resource in collection.values():
+            assert (
+                resource["labels"]["production-runtime.after-sale-flow.dev/lock-nonce"]
+                == "${PRODUCTION_RUNTIME_LOCK_NONCE:?}"
+            )
+
+
+def test_image_lock_binds_manifest_config_layers_source_and_provenance(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "images.json"
+    document = _image_lock()
+    common.write_json(path, document)
+    candidate, images, validated = common.load_image_lock(path)
+    assert candidate == "b" * 40
+    assert validated["self_hash"] == document["self_hash"]
+    assert all(
+        images[key]["reference"].endswith(images[key]["manifest_digest"])
+        for key in images
+    )
+
+    for mutation in ("self_hash", "config", "layers", "source"):
+        changed = copy.deepcopy(document)
+        if mutation == "self_hash":
+            changed["self_hash"] = "0" * 64
+        elif mutation == "config":
+            changed["images"]["java"]["config_digest"] = "not-a-digest"
+            changed = common.seal_self_hash(changed)
+        elif mutation == "layers":
+            changed["images"]["python"]["layer_digests"] = []
+            changed = common.seal_self_hash(changed)
+        else:
+            changed["images"]["frontend"]["source_revision"] = "wrong-source"
+            changed = common.seal_self_hash(changed)
+        common.write_json(path, changed)
+        with pytest.raises(common.ProductionError):
+            common.load_image_lock(path)
+
+
+def test_domain_graph_temporal_and_python_authority_are_physically_separated() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert _networks(services["domain-db"]) == {"domain-data"}
+    assert _networks(services["graph-db"]) == {"graph-data", "python-egress"}
+    assert _networks(services["temporal-db"]) == {"temporal-data"}
+    python = services["python-agent-service"]
+    assert _networks(python) == {"python-egress"}
+    assert "domain-data" not in _networks(python)
+    assert not any(
+        key.startswith(("POSTGRES_", "JAVA_DB_", "DOMAIN_DB_"))
+        for key in python["environment"]
+    )
+    assert not any("activation" in value.lower() for value in _volume_sources(python))
+    assert not any(
+        part in key
+        for key in python["environment"]
+        for part in ("ACTIVATION_JWS", "ACTIVATION_DIRECTORY", "ACTIVATION_PATH")
+    )
+
+
+def test_temporal_namespace_init_fails_closed_on_legacy_build_id_routing() -> None:
+    compose = _compose()
+    init = compose["services"]["temporal-namespace-init"]
+    assert init["environment"] == {
+        "PRODUCTION_RUNTIME_TEMPORAL_NAMESPACE": "${PRODUCTION_RUNTIME_TEMPORAL_NAMESPACE:?}",
+        "PRODUCTION_RUNTIME_CONTROL_BUILD_ID": "${PRODUCTION_RUNTIME_CONTROL_BUILD_ID:?}",
+        "PRODUCTION_RUNTIME_AGENT_BUILD_ID": "${PRODUCTION_RUNTIME_AGENT_BUILD_ID:?}",
+    }
+
+    source = (DEPLOY / "temporal" / "create-namespace.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "temporal --output json task-queue get-build-ids" in source
+    assert "temporal task-queue update-build-ids add-new-default" in source
+    assert "after-sale-control.${control_build_component}" in source
+    assert "after-sale-agent.${agent_build_component}" in source
+    assert "case-control" in source
+    assert "room-control" in source
+    assert "notification-and-tools" in source
+    assert "production-runtime-case-dispute" in source
+    assert "agent-execution" in source
+    assert "conflicting or incomplete Build ID routing" in source
+    assert "exit 1" in source
+
+
+def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
+    compose = _compose()
+    services = compose["services"]
+    python = services["python-agent-service"]
+    command = " ".join(python["command"])
+    assert "--uds /run/production-runtime/python/agent.sock" in command
+    assert "--host" not in command and "--port" not in command
+    assert not python.get("ports")
+    proxy = services["graph-mtls-proxy"]
+    assert _networks(proxy) == {"graph-mtls-client", "app-internal"}
+    assert _volume_sources(proxy) & _volume_sources(python) == {
+        "${PRODUCTION_RUNTIME_SOCKET_DIR:?}"
+    }
+    mtls = (DEPLOY / "nginx" / "mtls.conf").read_text(encoding="utf-8")
+    assert "server unix:/run/production-runtime/python/agent.sock" in mtls
+    assert "ssl_verify_client on" in mtls and "ssl_protocols TLSv1.3" in mtls
+    assert "location = /ready/graph" in mtls
+    assert "proxy_pass http://production_runtime_python_backend/ready/graph" in mtls
+    assert "location / {\n        return 404;" in mtls
+    for inbound in (
+        "X-Client-Cert",
+        "X-SSL-Client-Cert",
+        "X-Forwarded-Client-Cert",
+        "X-Service-Identity",
+    ):
+        assert f'proxy_set_header {inbound} ""' in mtls
+    adapter = (DEPLOY / "python" / "mtls_adapter.py").read_text(encoding="utf-8")
+    for proof in (
+        "expected_ca_sha256",
+        "expected_client_sha256",
+        "certificate.issuer",
+        "CLIENT_AUTH",
+        "uri_names != {self._expected_spiffe_id}",
+        "ca_key.verify",
+    ):
+        assert proof in adapter
+    readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
+    assert "tcp_bypass_listener_present" in readiness
+    assert "/proc/net/tcp" in readiness
+
+
+def test_preflight_allows_only_the_two_graph_mtls_proxy_networks() -> None:
+    preflight._validate_graph_mtls_proxy_networks(
+        {"networks": ["graph-mtls-client", "app-internal"]}
+    )
+
+    for networks in (
+        ["graph-mtls-client"],
+        ["graph-mtls-client", "app-internal", "unexpected-peer"],
+        ["graph-mtls-client", "unexpected-peer"],
+    ):
+        with pytest.raises(
+            common.ProductionError, match="mTLS proxy has an unexpected peer network"
+        ):
+            preflight._validate_graph_mtls_proxy_networks({"networks": networks})
+
+
+def test_preflight_requires_the_exact_restricted_graph_exchange_proxy() -> None:
+    preflight._validate_graph_exchange_proxy(
+        {
+            "networks": ["python-egress", "graph-exchange"],
+            "volumes": [
+                {
+                    "type": "bind",
+                    "source": str(DEPLOY / "nginx" / "exchange.conf"),
+                    "target": "/etc/nginx/conf.d/default.conf",
+                    "read_only": True,
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        common.ProductionError, match="graph exchange proxy config mount drifted"
+    ):
+        preflight._validate_graph_exchange_proxy(
+            {
+                "networks": ["python-egress", "graph-exchange"],
+                "volumes": [],
+            }
+        )
+
+
+def test_production_runtime_commands_decode_docker_output_as_utf8(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return common.subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    common.run_command(["docker", "version"], check=False)
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "strict"
+    assert "text" not in captured
+
+
+def test_browser_graph_readiness_is_exact_read_only_and_never_uses_mtls() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert "app-internal" in _networks(services["gateway"])
+    assert "app-internal" in _networks(services["graph-mtls-proxy"])
+    gateway = (DEPLOY / "nginx" / "gateway.conf").read_text(encoding="utf-8")
+    assert "location = /agent-api/health/model" in gateway
+    assert "proxy_pass http://graph-mtls-proxy:8080/ready/graph" in gateway
+    assert "graph-mtls-proxy:8443" not in gateway
+    assert "location ^~ /agent-api/ {\n        return 404;" in gateway
+    for header in (
+        "X-Client-Cert",
+        "X-SSL-Client-Cert",
+        "X-Forwarded-Client-Cert",
+        "X-Service-Identity",
+        "X-Production-Runtime-Mtls-Verified",
+        "X-Production-Runtime-Mtls-Certificate",
+    ):
+        assert f'proxy_set_header {header} ""' in gateway
+
+
+@pytest.mark.parametrize(
+    ("listener", "owned_inodes", "resolver_addresses", "expected_unexpected"),
+    (
+        (
+            {"family": "ipv4", "address": "127.0.0.11", "uid": "0", "inode": "1"},
+            set(),
+            {"127.0.0.11"},
+            [],
+        ),
+        (
+            {"family": "ipv4", "address": "0.0.0.0", "uid": "0", "inode": "2"},
+            set(),
+            {"127.0.0.11"},
+            ["2"],
+        ),
+        (
+            {"family": "ipv4", "address": "0.0.0.0", "uid": "0", "inode": "6"},
+            set(),
+            {"0.0.0.0"},
+            ["6"],
+        ),
+        (
+            {"family": "ipv4", "address": "172.28.0.5", "uid": "0", "inode": "3"},
+            set(),
+            {"127.0.0.11"},
+            ["3"],
+        ),
+        (
+            {"family": "ipv4", "address": "127.0.0.11", "uid": "0", "inode": "4"},
+            {"4"},
+            {"127.0.0.11"},
+            ["4"],
+        ),
+        (
+            {"family": "ipv4", "address": "127.0.0.1", "uid": "0", "inode": "5"},
+            set(),
+            {"127.0.0.11"},
+            ["5"],
+        ),
+    ),
+    ids=(
+        "docker-dns-ownerless-listener-is-allowed",
+        "wildcard-listener-is-rejected",
+        "wildcard-resolver-cannot-exempt-listener",
+        "container-ip-listener-is-rejected",
+        "process-owned-dns-listener-is-rejected",
+        "unexpected-ownerless-listener-is-rejected",
+    ),
+)
+def test_readiness_tcp_listener_exception_is_exact(
+    listener: dict[str, str],
+    owned_inodes: set[str],
+    resolver_addresses: set[str],
+    expected_unexpected: list[str],
+) -> None:
+    unexpected = readiness._unexpected_tcp_listeners(
+        [listener], owned_inodes, resolver_addresses
+    )
+    assert [item["inode"] for item in unexpected] == expected_unexpected
+
+
+def test_readiness_tcp_listener_ownership_scan_fails_closed() -> None:
+    class InaccessibleProc:
+        def iterdir(self):
+            raise PermissionError("ownership scan denied")
+
+    with pytest.raises(PermissionError, match="ownership scan denied"):
+        readiness._owned_socket_inodes(InaccessibleProc())
+
+
+def test_readiness_tcp_listener_ownership_scan_skips_inaccessible_process() -> None:
+    class InaccessibleProcess:
+        name = "92"
+
+        def __truediv__(self, _part: str):
+            return self
+
+        def iterdir(self):
+            raise PermissionError("process descriptors denied")
+
+    class VisibleProc:
+        def iterdir(self):
+            return iter((InaccessibleProcess(),))
+
+    assert readiness._owned_socket_inodes(VisibleProc()) == set()
+
+
+def test_readiness_tcp_listener_probe_reads_visible_process_ownership_and_resolver() -> (
+    None
+):
+    probe = readiness._tcp_listener_probe()
+    assert "Path('/proc/net/tcp6')" in probe
+    assert "(process / \"fd\").iterdir()" in probe
+    assert 'listener["inode"] in owned_socket_inodes' in probe
+    assert 'listener["family"] == "ipv4"' in probe
+    assert 'listener["address"] == "127.0.0.11"' in probe
+    assert '"127.0.0.11" in resolver_ipv4_addresses' in probe
+
+
+def test_jwks_is_static_public_only_and_has_no_java_business_surface() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert "jwks-publisher" not in services
+    jwks = services["jwks-server"]
+    assert jwks["image"] == "${PRODUCTION_RUNTIME_NGINX_IMAGE:?immutable image digest required}"
+    assert not jwks.get("environment")
+    assert _networks(jwks) == {"python-egress"}
+    assert services["python-agent-service"]["environment"]["GRAPH_JWKS_URL"] == (
+        "http://jwks-server:8080/.well-known/graph-jwks.json"
+    )
+    config = (DEPLOY / "nginx" / "jwks.conf").read_text(encoding="utf-8")
+    assert "location = /.well-known/graph-jwks.json" in config
+    assert "location /" in config and "return 404" in config
+    assert "HeaderAuthenticationFilter" not in config
+    python_members = {
+        name
+        for name, service in services.items()
+        if "python-egress" in _networks(service)
+    }
+    assert python_members == {
+        "python-agent-service",
+        "graph-db",
+        "minio",
+        "jwks-server",
+        "graph-exchange-proxy",
+    }
+    assert not any(name.startswith("java-") for name in python_members)
+
+
+def test_python_to_java_graph_exchange_uses_only_the_restricted_proxy() -> None:
+    compose = _compose()
+    services = compose["services"]
+    proxy = services["graph-exchange-proxy"]
+    python = services["python-agent-service"]
+    java_api = services["java-api-service"]
+
+    assert proxy["image"] == "${PRODUCTION_RUNTIME_NGINX_IMAGE:?immutable image digest required}"
+    assert _networks(proxy) == {"python-egress", "graph-exchange"}
+    assert _networks(python) == {"python-egress"}
+    assert "graph-exchange" in _networks(java_api)
+    assert python["environment"]["JAVA_API_SERVICE_URL"] == (
+        "http://graph-exchange-proxy:8080"
+    )
+    assert proxy["volumes"] == [
+        "./infra/environments/production-runtime-uat/nginx/exchange.conf:/etc/nginx/conf.d/default.conf:ro"
+    ]
+
+    graph_exchange_members = {
+        name
+        for name, service in services.items()
+        if "graph-exchange" in _networks(service)
+    }
+    assert graph_exchange_members == {"graph-exchange-proxy", "java-api-service"}
+
+    python_members = {
+        name
+        for name, service in services.items()
+        if "python-egress" in _networks(service)
+    }
+    assert python_members == {
+        "python-agent-service",
+        "graph-db",
+        "minio",
+        "jwks-server",
+        "graph-exchange-proxy",
+    }
+    assert not any(name.startswith("java-") for name in python_members)
+
+
+def test_graph_exchange_proxy_has_exact_post_allowlist_and_no_catch_all_proxy() -> None:
+    config = (DEPLOY / "nginx" / "exchange.conf").read_text(encoding="utf-8")
+    routes = {
+        "/internal/graph/intake/v2/payload:load",
+        "/internal/graph/intake/v2/proposals:put",
+        "/internal/graph/production-runtime/rooms/object:load",
+        "/internal/graph/production-runtime/rooms/proposal:put",
+    }
+
+    assert "location = /healthz" in config
+    assert "client_max_body_size 1m" in config
+    for route in routes:
+        block = config.split(f"location = {route} {{", 1)[1].split("\n    }", 1)[0]
+        assert "if ($request_method != POST)" in block
+        assert "return 404" in block
+        assert "proxy_set_header X-Service-Identity python-agent-service" in block
+        assert "proxy_set_header X-Service-Secret $http_x_service_secret" in block
+        assert "proxy_pass_request_body on" in block
+        assert "proxy_pass http://production_runtime_java_graph_exchange" in block
+
+    assert "/internal/evidence/" not in config
+    assert config.count("proxy_pass http://production_runtime_java_graph_exchange") == len(routes)
+    assert "location / {\n        return 404;\n    }" in config
+
+
+def test_activation_grant_is_java_control_only_and_python_gets_strict_projection() -> (
+    None
+):
+    compose = _compose()
+    services = compose["services"]
+    activation_consumers = {
+        name
+        for name, service in services.items()
+        if any(
+            "PRODUCTION_RUNTIME_ACTIVATION_DIR" in source for source in _volume_sources(service)
+        )
+    }
+    assert activation_consumers == {"java-control-worker"}
+    python_env = services["python-agent-service"]["environment"]
+    assert (
+        python_env["GRAPH_PRODUCTION_RUNTIME_CONTEXT"]
+        == "${GRAPH_PRODUCTION_RUNTIME_CONTEXT:?}"
+    )
+    assert python_env["GRAPH_PRODUCTION_RUNTIME_BINDINGS"] == "${GRAPH_PRODUCTION_RUNTIME_BINDINGS:?}"
+    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
+    for field in (
+        '"perCommandManifestAllowed": False',
+        '"databaseIdentities"',
+        '"trustedSigningKeyIds"',
+        'typ="production-runtime-activation+jwt"',
+    ):
+        assert field in provision
+
+
+def test_append_only_ledger_uses_real_p256_chain_and_detects_tamper(
+    tmp_path: Path,
+) -> None:
+    private, public, _private_path, _public_path = _write_key_pair(tmp_path, "harness")
+    now = dt.datetime.now(dt.timezone.utc)
+    run_context = _run_context(now)
+    context = common.ledger_context_from_run_context(run_context)
+    path = tmp_path / "ledger.jsonl"
+    first = ledger.append_record(
+        path,
+        private,
+        public,
+        key_id="harness-01",
+        context=context,
+        source_kind="HARNESS_DIRECT",
+        source_identity="unit-harness",
+        case_id=None,
+        payload_type="PROVISIONED_RUN_CONTEXT",
+        payload=run_context,
+    )
+    second = ledger.append_record(
+        path,
+        private,
+        public,
+        key_id="harness-01",
+        context=context,
+        source_kind="HARNESS_DIRECT",
+        source_identity="unit-runtime",
+        case_id=None,
+        payload_type="RUNTIME_MEASUREMENT",
+        payload={"measurement": "direct"},
+    )
+    records = ledger.verify_ledger(
+        path,
+        public,
+        expected_public_key_sha256=ledger.public_key_sha256(public),
+        expected_context=context,
+        require_fresh_last=True,
+    )
+    assert first["previous_record_hash"] == ledger.ZERO_SHA256
+    assert second["previous_record_hash"] == first["record_hash"]
+    assert len(records) == 2
+
+    tampered = path.read_text(encoding="utf-8").replace('"direct"', '"forged"')
+    path.write_text(tampered, encoding="utf-8")
+    with pytest.raises(common.ProductionError):
+        ledger.verify_ledger(
+            path,
+            public,
+            expected_public_key_sha256=ledger.public_key_sha256(public),
+            expected_context=context,
+        )
+
+
+def test_java_evidence_requires_real_jws_and_rejects_legacy_shadow_infra_and_stale() -> (
+    None
+):
+    now = dt.datetime.now(dt.timezone.utc)
+    private = ec.generate_private_key(ec.SECP256R1())
+    public = private.public_key()
+    run_context = _run_context(now)
+    measurement_hash = "9" * 64
+    evidence = _valid_evidence(run_context, measurement_hash)
+    compact = _java_jws(private, run_context, evidence, now)
+    result, key_id, verified = assertion.verify_java_attestation(
+        compact,
+        run_context=run_context,
+        runtime_measurement_hash=measurement_hash,
+        case_id="CASE_P9_SYNTHETIC_0001",
+        trusted_public_keys={"p9-java-finalizer-01": public},
+        now=now,
+    )
+    assert result["status"] == "PASS"
+    assert key_id == "p9-java-finalizer-01"
+    assert verified == evidence
+
+    for field, value in (
+        ("legacy_run_count", 1),
+        ("shadow_run_count", 1),
+        ("infra_only", True),
+        ("inventory_complete", False),
+    ):
+        changed = copy.deepcopy(evidence)
+        changed[field] = value
+        signed = _java_jws(private, run_context, changed, now)
+        with pytest.raises(common.ProductionError):
+            assertion.verify_java_attestation(
+                signed,
+                run_context=run_context,
+                runtime_measurement_hash=measurement_hash,
+                case_id="CASE_P9_SYNTHETIC_0001",
+                trusted_public_keys={"p9-java-finalizer-01": public},
+                now=now,
+            )
+
+    shadow = copy.deepcopy(evidence)
+    shadow["runs"][0]["shadow"] = True
+    signed_shadow = _java_jws(private, run_context, shadow, now)
+    with pytest.raises(common.ProductionError):
+        assertion.verify_java_attestation(
+            signed_shadow,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+
+    wrong_activation = copy.deepcopy(evidence)
+    wrong_activation["activation_receipt"]["manifest_hash"] = "0" * 64
+    signed_wrong_activation = _java_jws(
+        private, run_context, wrong_activation, now
+    )
+    with pytest.raises(common.ProductionError, match="activation manifest"):
+        assertion.verify_java_attestation(
+            signed_wrong_activation,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+
+    with pytest.raises(common.ProductionError):
+        assertion.verify_java_attestation(
+            compact[:-1] + ("A" if compact[-1] != "A" else "B"),
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+    with pytest.raises(common.ProductionError):
+        assertion.verify_java_attestation(
+            compact,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now + dt.timedelta(minutes=10),
+        )
+
+
+def test_assertion_has_fixed_run_local_source_and_no_arbitrary_url_or_path() -> None:
+    source = (SCRIPTS / "assert_evidence.py").read_text(encoding="utf-8")
+    assert "--source" not in source
+    assert "urlopen" not in source
+    assert 'evidence_dir / "inbox" / f"{case_id}.java-evidence.jws"' in source
+    assert 'source_kind="JAVA_SIGNED"' in source
+    assert "require_fresh_last=True" in source
+
+
+def test_attested_receipt_has_self_hash_and_real_signature(tmp_path: Path) -> None:
+    private, public, _private_path, _public_path = _write_key_pair(tmp_path, "receipt")
+    receipt = ledger.attest_document(
+        {"schema_version": "receipt.v1", "status": "PASS"},
+        private,
+        public,
+        key_id="receipt-key-01",
+    )
+    ledger.verify_attested_document(
+        receipt,
+        public,
+        expected_key_sha256=ledger.public_key_sha256(public),
+        context="unit receipt",
+    )
+    changed = copy.deepcopy(receipt)
+    changed["status"] = "FORGED"
+    with pytest.raises(common.ProductionError):
+        ledger.verify_attested_document(
+            changed,
+            public,
+            expected_key_sha256=ledger.public_key_sha256(public),
+            context="unit receipt",
+        )
+
+
+def test_env_cannot_redirect_paths_outside_the_host_locked_run(tmp_path: Path) -> None:
+    run_id = "p9-lock01"
+    project = f"aflow-production-runtime-{run_id}"
+    runtime_root = tmp_path / "production-runtime"
+    run_directory = runtime_root / run_id
+    locks = runtime_root / ".locks"
+    run_directory.mkdir(parents=True)
+    locks.mkdir()
+    port_lock_path = locks / "gateway-25180.lock.json"
+    port_lock = common.seal_self_hash(
+        {
+            "schema_version": "production-runtime-port-lock.v1",
+            "state": "ACTIVE",
+            "gateway_port": 25180,
+            "project_name": project,
+            "run_id": run_id,
+            "lock_nonce": "a" * 64,
+            "owner": common.current_owner(),
+            "created_at": "2026-07-27T00:00:00+00:00",
+            "released_at": None,
+        }
+    )
+    common.write_json(port_lock_path, port_lock)
+    lock_path = locks / f"{project}.lock.json"
+    host_lock = common.seal_self_hash(
+        {
+            "schema_version": "production-runtime-host-lock.v1",
+            "state": "ACTIVE",
+            "project_name": project,
+            "run_id": run_id,
+            "runtime_root": runtime_root.as_posix(),
+            "run_directory": run_directory.as_posix(),
+            "env_file": (run_directory / "production-runtime.env").as_posix(),
+            "lock_nonce": "a" * 64,
+            "owner": common.current_owner(),
+            "candidate_sha": "b" * 40,
+            "image_lock_hash": "c" * 64,
+            "gateway_port": 25180,
+            "port_lock": port_lock_path.as_posix(),
+            "resources": common.expected_resource_names(run_id),
+            "ledger_public_key_sha256": "d" * 64,
+            "created_at": "2026-07-27T00:00:00+00:00",
+            "released_at": None,
+        }
+    )
+    common.write_json(lock_path, host_lock)
+    values = {
+        "PRODUCTION_RUNTIME_LOCK_PATH": lock_path.as_posix(),
+        "PRODUCTION_RUNTIME_RUN_ID": run_id,
+        "PRODUCTION_RUNTIME_PROJECT_NAME": project,
+        "PRODUCTION_RUNTIME_LOCK_NONCE": "a" * 64,
+        "PRODUCTION_RUNTIME_BUILD_ID": "b" * 40,
+        "PRODUCTION_RUNTIME_SOURCE_COMMIT": "b" * 40,
+        "PRODUCTION_RUNTIME_IMAGE_LOCK_HASH": "c" * 64,
+        "PRODUCTION_RUNTIME_GATEWAY_PORT": "25180",
+        "PRODUCTION_RUNTIME_IMAGE_LOCK_PATH": (
+            run_directory / "image-lock.snapshot.json"
+        ).as_posix(),
+        "PRODUCTION_RUNTIME_RUN_CONTEXT_PATH": (run_directory / "run-context.json").as_posix(),
+        "PRODUCTION_RUNTIME_SECRETS_DIR": (run_directory / "secrets").as_posix(),
+        "PRODUCTION_RUNTIME_PUBLIC_DIR": (run_directory / "public").as_posix(),
+        "PRODUCTION_RUNTIME_ACTIVATION_DIR": (run_directory / "java-activation").as_posix(),
+        "PRODUCTION_RUNTIME_EVIDENCE_DIR": (run_directory / "evidence").as_posix(),
+        "PRODUCTION_RUNTIME_SOCKET_DIR": (run_directory / "python-socket").as_posix(),
+    }
+    env_path = run_directory / "production-runtime.env"
+    env_path.write_text(
+        "\n".join(f"{key}={common.env_quote(value)}" for key, value in values.items())
+        + "\n",
+        encoding="ascii",
+    )
+    common.validate_env_lock(env_path)
+    values["PRODUCTION_RUNTIME_PUBLIC_DIR"] = (tmp_path / "attacker-public").as_posix()
+    env_path.write_text(
+        "\n".join(f"{key}={common.env_quote(value)}" for key, value in values.items())
+        + "\n",
+        encoding="ascii",
+    )
+    with pytest.raises(common.ProductionError, match="redirects locked runtime path"):
+        common.validate_env_lock(env_path)
+
+
+def test_host_lock_and_teardown_are_exact_and_never_use_broad_compose_down() -> None:
+    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
+    assert "provision.coordinator" in provision
+    assert "O_EXCL" in provision
+    assert "production-runtime-host-lock.v1" in provision
+    assert "gateway-" in provision and "production-runtime-port-lock.v1" in provision
+    teardown = (SCRIPTS / "teardown.py").read_text(encoding="utf-8")
+    assert '"docker", "rm", "--force"' in teardown
+    assert '"docker", "network", "rm"' in teardown
+    assert '"docker", "volume", "rm"' in teardown
+    assert '"--remove-orphans"' not in teardown
+    assert '"down"' not in teardown
+    assert "_validate_labels" in teardown and "_release_port_lock" in teardown
+
+
+def test_application_contract_gates_keep_infrastructure_only_from_claiming_pass() -> (
+    None
+):
+    gates = json.loads(
+        (DEPLOY / "application-contract-gates.json").read_text(encoding="utf-8")
+    )
+    assert all(gate["required"] is True for gate in gates["gates"])
+    assert all(
+        gate["status"] == "BLOCKING_UNTIL_RUNTIME_PROVES" for gate in gates["gates"]
+    )
+    readiness_source = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
+    assert '"status": "INFRASTRUCTURE_READY_ONLY"' in readiness_source
+    assert '"production_lane_runnable": False' in readiness_source
+    assert "runtime_measurement_hash" in readiness_source
+
+
+def test_local_source_dirty_manifest_is_closed_complete_and_fully_hashed() -> None:
+    launcher = _read_optional_local_source_launcher()
+    required_paths = {
+        ".local-dev/launch-source.ps1",
+        ".local-dev/provision-local-target.py",
+        "apps/domain-service/src/main/java/com/example/dispute/room/application/EvidenceAgentTurnService.java",
+        "apps/domain-service/src/main/java/com/example/dispute/room/application/EvidenceContextEnvelopeFactory.java",
+        "apps/domain-service/src/main/java/com/example/dispute/room/application/EvidenceContextEnvelopeV1.java",
+        "apps/domain-service/src/main/java/com/example/dispute/room/application/IntakeBranchDomainService.java",
+        "apps/domain-service/src/main/java/com/example/dispute/room/infrastructure/persistence/JdbcIntakeFormalBranchCommitPort.java",
+        "apps/domain-service/src/main/java/com/example/dispute/room/infrastructure/persistence/repository/CaseTimelineEventRepository.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/application/epoch/RoomEpochAllocator.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/application/epoch/TransactionalRoomEpochAllocator.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/application/intake/IntakeDossierProjectionMerger.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/contract/v1/FrozenIntakeSubmissionAuthority.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/entity/CaseProcessProjectionEntity.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/runtime/graph/HttpProductionGraphProposalClient.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/runtime/temporal/TargetTypedRoomCaseProcessDispatcher.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessCarryState.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessExpiredTargetEvidenceTerminalRecoveryRequest.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessExpiredTargetEvidenceTerminalRecoveryResult.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomSnapshot.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomStart.java",
+        "apps/domain-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflowImpl.java",
+        "apps/domain-service/src/test/java/com/example/dispute/room/EvidenceAgentTurnServiceTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/activity/intake/JdbcIntakeFormalBranchCommitPortTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/activity/intake/IntakeDossierProjectionMergerTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/caseprocess/CaseProcessCarryStateCompatibilityTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/caseprocess/CaseProcessWorkflowReplayTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/projection/IntakeProcessProjectionCompletionServiceIntegrationTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/room/RoomEpochAllocatorIntegrationTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/runtime/graph/HttpProductionGraphProposalClientTest.java",
+        "apps/domain-service/src/test/java/com/example/dispute/workflow/runtime/temporal/TargetTypedRoomCaseProcessDispatcherTest.java",
+        "apps/agent-runtime/app/agents/dispute_intake_officer/room_utterance.py",
+        "apps/agent-runtime/app/agents/dispute_intake_officer/schemas.py",
+        "apps/agent-runtime/app/agents/dispute_intake_officer/skills/dossier/dossier_skill.py",
+        "apps/agent-runtime/app/agents/dispute_intake_officer/workflow.py",
+        "apps/agent-runtime/app/agents/prompts/dispute_intake_officer/intake_turn_case_detail.md",
+        "apps/agent-runtime/app/graph_runtime/intake_executor.py",
+        "apps/agent-runtime/app/graphs/intake/__init__.py",
+        "apps/agent-runtime/app/graphs/intake/baseline.py",
+        "apps/agent-runtime/app/graphs/intake/contracts.py",
+        "apps/agent-runtime/app/graphs/intake/lcel.py",
+        "apps/agent-runtime/app/graphs/intake/nodes.py",
+        "apps/agent-runtime/app/graphs/intake/validators.py",
+        "apps/agent-runtime/app/harness/evidence_context_assembler.py",
+        "apps/agent-runtime/app/schemas/final_agents.py",
+        "apps/agent-runtime/tests/agents/test_intake_case_detail_dossier.py",
+        "apps/agent-runtime/tests/agents/test_evidence_clerk_turn.py",
+        "apps/agent-runtime/tests/integration/api/test_graph_commands.py",
+        "apps/agent-runtime/tests/graph_runtime/unit/test_production_bindings.py",
+        "apps/agent-runtime/tests/graphs/intake/test_lcel.py",
+        "apps/agent-runtime/tests/graphs/intake/test_package_imports.py",
+        "tests/static/test_local_source_process_ownership.py",
+        "tests/static/test_phase9_production_runtime_contract.py",
+        "tests/static/test_phase9_production_runtime_deployment.py",
+        "tests/static/test_phase9_production_runtime_provisioning.py",
+    }
+
+    for path in required_paths:
+        assert f'"{path}"' in launcher
+    assert "$dirtySourceBindings = @($dirtySourceEntries" in launcher
+    assert '$_.Path + "|" + $_.Sha256' in launcher
+    assert "$dirtyJavaSourceBindings" not in launcher
+    assert "PRODUCTION_RUNTIME_DIRTY_SOURCE_AUTHORITY_REJECTED" in launcher
+    assert "PRODUCTION_RUNTIME_DIRTY_SOURCE_AUTHORITY_DRIFT" in launcher
+
+
+def test_local_source_launcher_passes_binding_and_gates_before_mutation() -> None:
+    launcher = _read_optional_local_source_launcher()
+    gate = launcher.index(
+        "$sourceTopologyOwnershipGate = Invoke-SourceTopologyOwnershipGate"
+    )
+    migration = launcher.index("Invoke-DomainMigrationPreflight", gate)
+    provision = launcher.index(
+        '& "D:\\miniconda\\python.exe" $provisioner', gate
+    )
+    temporal_routing = launcher.index("Ensure-TemporalDefaultBuildId `", gate)
+
+    assert gate < migration < provision < temporal_routing
+    assert "--compiled-worktree-binding $expectedJavaSourceBinding" in launcher
+    assert (
+        "[string]$targetState.compiled_worktree_binding -cne "
+        "$expectedJavaSourceBinding"
+    ) in launcher
+    assert (
+        "[string]$targetState.activation_id -ceq $retainedActivationId"
+    ) in launcher
+    rollback_marker = "SOURCE_TOPOLOGY_STOPPED_BEFORE_IRREVERSIBLE_PROVISION"
+    assert launcher.index(rollback_marker, gate) < migration
+    assert "OwnershipRollbackBoundary = $sourceTopologyRollbackBoundary" in launcher
+
+
+def test_local_source_clean_launch_retains_exact_overlay_replay_semantics() -> None:
+    launcher = _read_optional_local_source_launcher()
+
+    assert "$dirtySourceEntries = @()" in launcher
+    assert (
+        '$expectedJavaSourceBinding = Get-ProductionSourceBindingHash `\n'
+        '    -Value ((@("HEAD|$candidateSha") + $dirtySourceBindings) -join "`n")'
+        in launcher
+    )
+    assert "$mustBuildJavaOverlay =" in launcher
+    assert "$canonicalCompiledSourceSha -cne $candidateSha" in launcher
+    assert "$canonicalWorktreeBinding -cne $expectedJavaSourceBinding" in launcher
+    assert "$validatedTargetClasses = if ($null -eq $stagedTargetClasses)" in launcher
+
+
+def test_local_source_frontend_spawn_scopes_ci_and_preserves_identity() -> None:
+    launcher = _read_optional_local_source_launcher()
+
+    command = launcher.index('$frontendCommand = \'pnpm --dir "{0}" dev\'')
+    capture = launcher.index(
+        '$frontendCiWasPresent = Test-Path -LiteralPath "Env:CI"', command
+    )
+    scoped_try = launcher.index("    try {", capture)
+    ci_true = launcher.index(
+        'Set-Item -LiteralPath "Env:CI" -Value "true"', scoped_try
+    )
+    spawn = launcher.index("$frontend = Start-Process `", ci_true)
+    scoped_finally = launcher.index("    } finally {", spawn)
+    restore = launcher.index(
+        'Set-Item -LiteralPath "Env:CI" -Value $frontendPreviousCiValue',
+        scoped_finally,
+    )
+    remove = launcher.index(
+        'Remove-Item -LiteralPath "Env:CI" -ErrorAction SilentlyContinue', restore
+    )
+    ownership = launcher.index("    if (-not $BypassFrontendOwnership)", remove)
+    java_readiness = launcher.index('        -Name "Java API"', ownership)
+    python_spawn = launcher.index("$pythonAgent = Start-Process `", java_readiness)
+
+    assert command < capture < scoped_try < ci_true < spawn
+    assert spawn < scoped_finally < restore < remove < ownership
+    assert ownership < java_readiness < python_spawn
+
+    scoped_spawn = launcher[capture:ownership]
+    assert (
+        '$frontend = Start-Process `\n'
+        '            -FilePath "cmd.exe" `\n'
+        '            -ArgumentList @("/d", "/c", $frontendCommand) `\n'
+        "            -WorkingDirectory $frontendDir `\n"
+        "            -WindowStyle Hidden `\n"
+        "            -PassThru"
+    ) in scoped_spawn
+    assert "RedirectStandardInput" not in scoped_spawn
+    assert '"NUL"' not in scoped_spawn
+    assert "'NUL'" not in scoped_spawn
+    assert "BypassFrontendOwnership" not in scoped_spawn
+
+
+def test_local_source_frontend_spawn_restores_ci_when_spawn_throws(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is required to execute the launcher CI-scope contract")
+
+    launcher = _read_optional_local_source_launcher()
+    scope_start = launcher.index(
+        '    $frontendCiWasPresent = Test-Path -LiteralPath "Env:CI"'
+    )
+    scope_end = launcher.index("    if (-not $BypassFrontendOwnership)", scope_start)
+    scoped_spawn = textwrap.dedent(launcher[scope_start:scope_end]).rstrip()
+    executable_scope = textwrap.indent(scoped_spawn, "        ")
+
+    harness = f'''$ErrorActionPreference = "Stop"
+$script:ThrowSpawn = $false
+$script:ObservedCi = @()
+
+function Start-Process {{
+    param(
+        [string]$FilePath,
+        [object[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$WindowStyle,
+        [switch]$PassThru
+    )
+    $script:ObservedCi += if (Test-Path -LiteralPath "Env:CI") {{
+        (Get-Item -LiteralPath "Env:CI").Value
+    }} else {{
+        "<ABSENT>"
+    }}
+    if ($script:ThrowSpawn) {{
+        throw "synthetic spawn failure"
+    }}
+    return [pscustomobject]@{{ Id = 4242 }}
+}}
+
+function Invoke-CiScenario {{
+    param(
+        [bool]$InitiallyPresent,
+        [AllowEmptyString()][string]$InitialValue,
+        [bool]$ThrowSpawn
+    )
+    if ($InitiallyPresent) {{
+        Set-Item -LiteralPath "Env:CI" -Value $InitialValue
+    }} else {{
+        Remove-Item -LiteralPath "Env:CI" -ErrorAction SilentlyContinue
+    }}
+    $script:ThrowSpawn = $ThrowSpawn
+    $script:ObservedCi = @()
+    $frontendDir = "C:\\frontend"
+    $frontendCommand = 'pnpm --dir "C:\\frontend" dev'
+    $caughtExpectedFailure = $false
+    try {{
+{executable_scope}
+    }} catch {{
+        if (-not $ThrowSpawn -or $_.Exception.Message -cne "synthetic spawn failure") {{
+            throw
+        }}
+        $caughtExpectedFailure = $true
+    }}
+
+    if ($script:ObservedCi.Count -ne 1 -or $script:ObservedCi[0] -cne "true") {{
+        throw "frontend child did not observe exact CI=true"
+    }}
+    if ($ThrowSpawn -and -not $caughtExpectedFailure) {{
+        throw "synthetic spawn failure was not propagated"
+    }}
+    if ($InitiallyPresent) {{
+        if (-not (Test-Path -LiteralPath "Env:CI")) {{
+            throw "prior CI presence was not restored"
+        }}
+        $restored = (Get-Item -LiteralPath "Env:CI").Value
+        if ($restored -cne $InitialValue) {{
+            throw "prior CI value was not restored exactly"
+        }}
+    }} elseif (Test-Path -LiteralPath "Env:CI") {{
+        throw "originally absent CI was not removed"
+    }}
+}}
+
+Invoke-CiScenario -InitiallyPresent $false -InitialValue "" -ThrowSpawn $false
+Invoke-CiScenario -InitiallyPresent $true -InitialValue "Original-CI-Value" -ThrowSpawn $false
+Invoke-CiScenario -InitiallyPresent $false -InitialValue "" -ThrowSpawn $true
+Invoke-CiScenario -InitiallyPresent $true -InitialValue "Original-CI-Value" -ThrowSpawn $true
+Write-Output "FRONTEND_CI_SCOPE_OK"
+'''
+    harness_path = tmp_path / "frontend-ci-scope-harness.ps1"
+    harness_path.write_text(harness, encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert completed.stdout.strip() == "FRONTEND_CI_SCOPE_OK"

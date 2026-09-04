@@ -5,7 +5,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import java.time.Instant;
 
 final class RoomEpochProvisioningFixtures {
@@ -124,9 +124,9 @@ final class RoomEpochProvisioningFixtures {
                 "p9-case-build",
                 roomWorkflowType,
                 "p9-control-build",
-                "all-rooms.target-e2e.v1",
+                "all-rooms.production-runtime.v1",
                 TargetTypedRoomProtocol.GRAPH_VERSION,
-                "target-e2e-checkpoint.v1",
+                "production-runtime-checkpoint.v1",
                 "agent-stream.v2",
                 4,
                 6,

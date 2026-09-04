@@ -1,4 +1,4 @@
-"""Formal target-E2E Evidence turn execution over Java-frozen authority."""
+"""Formal production-runtime Evidence turn execution over Java-frozen authority."""
 
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.result import CompletedDraft, ResultBindings
-from app.graph_runtime.target_e2e import (
-    TargetE2ERoomProposal,
-    TargetE2ERoomProposalSource,
+from app.graph_runtime.production_runtime import (
+    ProductionRoomProposal,
+    ProductionRoomProposalSource,
 )
 from app.harness.evidence_context_assembler import EvidenceContextAssembler
 from app.schemas import (
@@ -73,15 +73,15 @@ from app.streaming import (
 )
 
 
-_INVOCATION_SCHEMA = "target-e2e-evidence-turn-invocation.v2"
-_PROPOSAL_PAYLOAD_SCHEMA = "target-e2e-evidence-turn-proposal.v1"
-_PROPOSAL_PAYLOAD_SCHEMA_V2 = "target-e2e-evidence-turn-proposal.v2"
-_OUTER_PROPOSAL_SCHEMA = "target-e2e-evidence-proposal.v1"
-_OUTER_PROPOSAL_SCHEMA_V2 = "target-e2e-evidence-proposal.v2"
-_PROPOSAL_SOURCE_SCHEMA = "target-e2e-room-proposal-source.v2"
-_PROPOSAL_SOURCE_SCHEMA_V2 = "target-e2e-room-proposal-source.v2"
-_STATE_SCHEMA = "target-e2e-evidence-turn-state.v1"
-_STATE_SCHEMA_V2 = "target-e2e-evidence-turn-state.v2"
+_INVOCATION_SCHEMA = "production-runtime-evidence-turn-invocation.v2"
+_PROPOSAL_PAYLOAD_SCHEMA = "production-runtime-evidence-turn-proposal.v1"
+_PROPOSAL_PAYLOAD_SCHEMA_V2 = "production-runtime-evidence-turn-proposal.v2"
+_OUTER_PROPOSAL_SCHEMA = "production-runtime-evidence-proposal.v1"
+_OUTER_PROPOSAL_SCHEMA_V2 = "production-runtime-evidence-proposal.v2"
+_PROPOSAL_SOURCE_SCHEMA = "production-runtime-room-proposal-source.v2"
+_PROPOSAL_SOURCE_SCHEMA_V2 = "production-runtime-room-proposal-source.v2"
+_STATE_SCHEMA = "production-runtime-evidence-turn-state.v1"
+_STATE_SCHEMA_V2 = "production-runtime-evidence-turn-state.v2"
 _NODE = "evidence_turn"
 _MAX_VISIBLE_DELTA = 4096
 _SUBMISSION_OBSERVATIONS_FIELD = "public_observations"
@@ -880,12 +880,12 @@ class CompiledEvidenceTurnExecutor:
             checkpoint_id=checkpoint_id,
             cognitive_revision=cognitive_revision,
         )
-        source = TargetE2ERoomProposalSource(
+        source = ProductionRoomProposalSource(
                 schema_version=(
                     _PROPOSAL_SOURCE_SCHEMA_V2 if v2_workflow else _PROPOSAL_SOURCE_SCHEMA
                 ),
                 room_type="EVIDENCE",
-                proposal=TargetE2ERoomProposal(
+                proposal=ProductionRoomProposal(
                 schema_version=(
                     _OUTER_PROPOSAL_SCHEMA_V2 if v2_workflow else _OUTER_PROPOSAL_SCHEMA
                 ),
@@ -988,7 +988,7 @@ class CompiledEvidenceTurnExecutor:
             command.room_type != "EVIDENCE"
             or command.event_ref is None
             or reference.schema_version != _INVOCATION_SCHEMA
-            or execution.fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            or execution.fence.execution_lane is not GraphGatewayMode.PRODUCTION
         ):
             raise GraphContractError("EVIDENCE_TURN_FORMAL_INVOCATION_REQUIRED")
         payload = await store.load(reference)
@@ -1580,7 +1580,7 @@ class CompiledEvidenceTurnExecutor:
     def _materialize_result(
         execution: GatewayExecution,
         *,
-        source: TargetE2ERoomProposalSource,
+        source: ProductionRoomProposalSource,
         artifact: ArtifactPointer,
         usage: Usage,
         checkpoint_ns: str,

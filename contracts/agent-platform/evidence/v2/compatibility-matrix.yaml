@@ -232,21 +232,21 @@ projection_compatibility:
     active_graph_run: null
     authorization_material_exposed: false
     write_behavior_changed: false
-  target_e2e_temporal:
-    scope: ACTIVATION_BOUND_TARGET_E2E_ONLY
-    execution_lane: TARGET_E2E_CANDIDATE
+  production_runtime_temporal:
+    scope: ACTIVATION_BOUND_PRODUCTION_RUNTIME_ONLY
+    execution_lane: PRODUCTION
     writer_mode: TEMPORAL
-    graph_runtime_mode: TARGET_E2E_CANDIDATE
-    activation_case_scope: persisted_target_e2e_case_reservation
+    graph_runtime_mode: PRODUCTION
+    activation_case_scope: persisted_production_runtime_case_reservation
     temporal_evidence_allocation_allowed: true
     formal_graph_sink_allowed: false
     real_case_shadow_allowed: false
-    graph_version: target-e2e-graph.2026-08-18.1
-    checkpoint_schema_version: target-e2e-checkpoint.v2
-    prompt_version: all-rooms-prompt.target-e2e.v2
-    model_profile_id: target-e2e.contract-blocked
-    policy_version: all-rooms-policy.target-e2e.v1
-    guardrail_version: all-rooms-guardrail.target-e2e.v1
+    graph_version: production-runtime-graph.2026-08-18.1
+    checkpoint_schema_version: production-runtime-checkpoint.v2
+    prompt_version: all-rooms-prompt.production-runtime.v2
+    model_profile_id: production-runtime.contract-blocked
+    policy_version: all-rooms-policy.production-runtime.v1
+    guardrail_version: all-rooms-guardrail.production-runtime.v1
     tool_policy_version: tools.none.v1
 governance:
   closed_root_schema_set: true

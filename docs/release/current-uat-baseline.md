@@ -1,25 +1,26 @@
 # 当前 UAT 基线
 
 - 文档日期：2026-09-04
-- UAT 运行代码提交：`10526e58b954498f69bae00ea709f6f9e4981971`
+- UAT 运行代码提交：`10526e58b954498f69bae00ea709f6f9e4981971`（生产 clean break 前）
 - UAT 后首个 README 同步提交：`f5cb06864272a10da8c893feec036265322242e5`
 - 浏览器 fresh case：`CASE_P9_6A98633E_11`
 - 结果：六站流程完成，进度 `6 / 6`
 
-旧的同名本地 UAT 分支早于上述代码真值，不作为文档或发布输入。后续候选必须以实际
-`main` commit、构建 artifact 和 activation hash 重新绑定，不能只复用本页的 case 结论。
+该案件证明 V4 并行 Graph 的业务行为能够完成六站流程，但不证明重命名后的生产构件
+字节身份。Production Runtime 发布必须以实际 `main` commit、构建 artifact 和 activation
+hash 重新绑定，并使用全新数据库与 Temporal namespace，不能复用该案件的持久状态。
 
 ## 版本身份
 
 | 维度 | 当前 UAT 代码基线 |
 | --- | --- |
 | 生产 Contract Baseline | `production-contract-baseline.v1` |
-| Graph key | `all-rooms.target-e2e.v2` |
-| Graph version | `target-e2e-graph.2026-08-18.3` |
-| Checkpoint | `target-e2e-checkpoint.v2` |
-| Intake profile | 新 epoch 为 `PARALLEL_FRAMES_V1`；历史 epoch 保留 `MONOLITHIC_V3` replay |
+| Graph key | `all-rooms.production-runtime.v2` |
+| Graph version | `production-runtime-graph.2026-08-18.3` |
+| Checkpoint | `production-runtime-checkpoint.v2` |
+| Intake profile | `PARALLEL_FRAMES_V1`；生产 clean break 不接入旧 `MONOLITHIC_V3` UAT History |
 | Intake stream | `agent-stream.v4` |
-| 其他目标房间 stream | `agent-stream.v3` |
+| Evidence / Hearing / Outcome stream | `agent-stream.v3` |
 | Evidence | `evidence_room_context.v2` / `evidence_turn_stream.v3` / `evidence-turn-result.v3` |
 | 模型 | `qwen3.8-flash`；thinking 关闭；strict JSON Schema |
 | Domain migration | Flyway `V094` |
@@ -45,10 +46,10 @@ Contract Baseline v1 是统一发布目录，不会把 `agent-stream.v4`、`hear
 `1.29.7`。仓库 Compose 默认仍为 `temporalio/auto-setup:1.25.2`，本页不会也不能授权
 任何启动脚本自动升级 Temporal、数据库或其他核心组件。
 
-UAT 成功证明当前候选业务路径可完成，不等于默认生产 feature flag 已开启，也不替代：
+UAT 成功证明业务路径可完成，不等于当前生产重构构件已发布，也不替代：
 
 - 全仓静态、Java、Python、OCR、前端和 Compose 检查；
-- Temporal replay、旧 History/Graph 兼容性与 Worker versioning 门禁；
+- 新生产 namespace 上的 synthetic routing、Worker versioning 与 fresh-case 门禁；
 - 生产容量、安全、备份恢复、监控和回滚证据；
 - 正式镜像、配置、密钥、数据库 migration 与 activation 的同一提交绑定。
 

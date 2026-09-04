@@ -350,18 +350,18 @@ def test_e1_keeps_evidence_runtime_closed_to_disabled_or_signed_synthetic_shadow
     assert re.search(
         r"EvidenceRuntimeMode\s*=\s*Literal\[\s*"
         r'"DISABLED",\s*"SIGNED_SYNTHETIC_SHADOW",\s*'
-        r'"TARGET_E2E_CANDIDATE",\s*\]',
+        r'"PRODUCTION",\s*\]',
         runtime,
     )
     assert (
-        'runtime_mode not in {"SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"}'
+        'runtime_mode not in {"SIGNED_SYNTHETIC_SHADOW", "PRODUCTION"}'
         in runtime
     )
     assert (
-        'runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"]'
+        'runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW", "PRODUCTION"]'
         in runtime
     )
-    assert 'if runtime_mode == "TARGET_E2E_CANDIDATE"' in runtime
+    assert 'if runtime_mode == "PRODUCTION"' in runtime
     assert '"formal_sink_eligible": False' in runtime
     for forbidden in (
         "EvidenceGraphResultFinalizer",

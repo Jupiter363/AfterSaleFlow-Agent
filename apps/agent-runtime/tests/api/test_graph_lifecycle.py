@@ -52,12 +52,12 @@ BASE_SETTINGS = {
         ("TERMINATE", "a" * 64, "ACTIVITY_RETRY_EXHAUSTED"),
     ],
 )
-def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
+def test_runtime_production_runtime_verifier_delegates_parallel_envelopes(
     phase: str,
     admission_receipt_sha256: str | None,
     failure_code: str | None,
 ) -> None:
-    verified = object.__new__(graph_lifecycle.VerifiedTargetE2EInvocation)
+    verified = object.__new__(graph_lifecycle.VerifiedProductionInvocation)
     envelope = object()
     transport_identity = object()
     calls: list[dict[str, Any]] = []
@@ -69,9 +69,9 @@ def test_runtime_target_e2e_verifier_delegates_parallel_envelopes(
 
     class RuntimeHandle:
         def require_runtime(self) -> Any:
-            return SimpleNamespace(target_e2e_verifier=Verifier())
+            return SimpleNamespace(production_runtime_verifier=Verifier())
 
-    runtime_verifier = graph_lifecycle._RuntimeTargetE2EVerifier(
+    runtime_verifier = graph_lifecycle._RuntimeProductionVerifier(
         cast(Any, RuntimeHandle())
     )
 
@@ -188,14 +188,14 @@ async def test_runtime_parallel_intake_service_delegates_all_protocol_phases() -
     ]
 
 
-def test_target_e2e_prompt_resources_are_required_before_runtime_readiness() -> None:
-    graph_lifecycle._require_target_e2e_prompt_resources(
-        [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v2")]
+def test_production_runtime_prompt_resources_are_required_before_runtime_readiness() -> None:
+    graph_lifecycle._require_production_runtime_prompt_resources(
+        [SimpleNamespace(prompt_version="all-rooms-prompt.production-runtime.v2")]
     )
 
     with pytest.raises(PromptResourceError) as retired:
-        graph_lifecycle._require_target_e2e_prompt_resources(
-            [SimpleNamespace(prompt_version="all-rooms-prompt.target-e2e.v1")]
+        graph_lifecycle._require_production_runtime_prompt_resources(
+            [SimpleNamespace(prompt_version="all-rooms-prompt.production-runtime.v1")]
         )
     assert retired.value.code == "GRAPH_PROMPT_RESOURCE_UNAVAILABLE"
 
@@ -495,7 +495,7 @@ async def test_disabled_lifespan_never_constructs_graph_dependencies() -> None:
     assert handle.reconciliation_endpoint_dependencies().mode == "DISABLED"
 
 
-def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
+def test_production_runtime_bindings_are_assembled_from_the_open_security_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The candidate provider factory must receive the opened runtime, not settings."""
@@ -518,16 +518,16 @@ def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
 
     def build_bindings(settings: Settings, **kwargs: Any) -> GraphRuntimeBindings:
         captured["settings"] = settings
-        captured["provider_factory"] = kwargs["target_e2e_specialized_provider_factory"]
-        captured["lifecycle_room_exchange"] = kwargs["target_e2e_room_exchange"]
+        captured["provider_factory"] = kwargs["production_runtime_specialized_provider_factory"]
+        captured["lifecycle_room_exchange"] = kwargs["production_runtime_room_exchange"]
         return expected
 
     monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
-    monkeypatch.setattr(executor, "TargetE2ESpecializedRoomProviderFactory", ProviderFactory)
+    monkeypatch.setattr(executor, "ProductionSpecializedRoomProviderFactory", ProviderFactory)
     monkeypatch.setattr(production_bindings, "build_graph_runtime_bindings", build_bindings)
 
     runtime = SecurityRuntime()
-    actual = graph_lifecycle._build_target_e2e_runtime_bindings(
+    actual = graph_lifecycle._build_production_runtime_bindings(
         settings=_settings(),
         security_runtime=cast(Any, runtime),
     )
@@ -541,7 +541,7 @@ def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
 
 
 @pytest.mark.asyncio
-async def test_target_e2e_handle_defers_binding_construction_to_runtime_lifecycle() -> None:
+async def test_production_runtime_handle_defers_binding_construction_to_runtime_lifecycle() -> None:
     events: list[str] = []
 
     async def runtime_factory(
@@ -554,7 +554,7 @@ async def test_target_e2e_handle_defers_binding_construction_to_runtime_lifecycl
         return _FakeRuntime(events)
 
     handle = GraphRuntimeHandle(settings=_settings(), runtime_factory=runtime_factory)
-    handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+    handle._mode = GraphGatewayMode.PRODUCTION
 
     async with handle.lifespan(None):
         assert handle.ready is True

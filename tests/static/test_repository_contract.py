@@ -207,7 +207,7 @@ def test_current_architecture_documents_match_the_uat_release_identity() -> None
     ).read_text(encoding="utf-8")
 
     for document in (readme, intake, evidence, platform, acceptance):
-        assert "target-e2e-graph.2026-08-18.3" in document
+        assert "production-runtime-graph.2026-08-18.3" in document
         assert "qwen3.8-flash" in document
 
     for document in (readme, intake, platform, acceptance):
@@ -230,20 +230,27 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
 
     assert catalog["schema_version"] == "production-contract-baseline.v1"
     assert catalog["status"] == "CURRENT"
-    assert catalog["source"]["branch"] == "main"
-    assert catalog["source"]["runtime_commit"] == (
-        "10526e58b954498f69bae00ea709f6f9e4981971"
-    )
+    assert catalog["source"] == {
+        "branch": "main",
+        "behavioral_uat_commit": "10526e58b954498f69bae00ea709f6f9e4981971",
+        "production_refactor_base_commit": (
+            "265667ac9224d69a040bfa3324343f2b27cd4f67"
+        ),
+        "catalog_origin_commit": "9118f0ee16e94dec92e3c321859235cd7861afb2",
+        "release_commit_binding": "IMAGE_PROVENANCE_REQUIRED",
+    }
     assert catalog["versioning_policy"] == {
         "baseline_is_release_catalog": True,
         "wire_contract_versions_are_immutable": True,
         "versionless_wire_contracts_allowed": False,
         "renumber_existing_wire_contracts": False,
+        "preproduction_identifiers_compatible": False,
+        "fresh_persistence_required": True,
     }
     assert catalog["graph"] == {
-        "key": "all-rooms.target-e2e.v2",
-        "version": "target-e2e-graph.2026-08-18.3",
-        "checkpoint_schema": "target-e2e-checkpoint.v2",
+        "key": "all-rooms.production-runtime.v2",
+        "version": "production-runtime-graph.2026-08-18.3",
+        "checkpoint_schema": "production-runtime-checkpoint.v2",
         "command_schema": "room-graph-command.v1",
         "result_schema": "room-graph-result.v1",
     }
@@ -272,9 +279,9 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
         path.read_text(encoding="utf-8")
         for path in (
             ROOT
-            / "apps/domain-service/src/main/java/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java",
+            / "apps/domain-service/src/main/java/com/example/dispute/workflow/runtime/temporal/TargetTypedRoomProtocol.java",
             ROOT
-            / "apps/domain-service/src/main/java/com/example/dispute/workflow/targete2e/graph/TargetE2EIntakeParallelAssemblyCoordinator.java",
+            / "apps/domain-service/src/main/java/com/example/dispute/workflow/runtime/graph/ProductionIntakeParallelAssemblyCoordinator.java",
             ROOT / "apps/agent-runtime/app/config.py",
             ROOT / "apps/web/src/api/agentStream.js",
             ROOT / "apps/agent-runtime/app/agents/dispute_intake_officer/workflow.py",
@@ -306,7 +313,7 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
 
     assert (
         ROOT
-        / "apps/domain-service/src/main/resources/db/migration/V094__target_e2e_graph_patch_release_identity.sql"
+        / "apps/domain-service/src/main/resources/db/migration/V094__production_runtime_graph_patch_release_identity.sql"
     ).is_file()
     assert (
         ROOT

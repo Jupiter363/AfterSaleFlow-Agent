@@ -45,9 +45,9 @@ from app.graph_runtime.ledger import (
     ResultRecord,
 )
 from app.graph_runtime.lease import LEASE_DURATION_SECONDS, LEASE_DURATION_SQL
-from app.graph_runtime.target_e2e import (
-    TargetE2ERoomProposalSource,
-    build_target_e2e_result_envelope,
+from app.graph_runtime.production_runtime import (
+    ProductionRoomProposalSource,
+    build_production_runtime_result_envelope,
 )
 from app.graph_runtime.result import (
     TERMINAL_DRAFT_ADAPTER,
@@ -103,12 +103,12 @@ returning lease.fencing_token, lease.lease_revision,
           lease.renewed_at, lease.lease_expires_at
 """
 
-TARGET_E2E_ROOM_FENCE_SQL: Final[str] = """
+PRODUCTION_RUNTIME_ROOM_FENCE_SQL: Final[str] = """
 select room.room_fencing_token
-  from agent_graph_target_e2e_room_authority room
-  join agent_graph_target_e2e_activation activation
+  from agent_graph_production_runtime_room_authority room
+  join agent_graph_production_runtime_activation activation
     on activation.activation_id = room.activation_id
-  join agent_graph_target_e2e_activation_lifecycle lifecycle
+  join agent_graph_production_runtime_activation_lifecycle lifecycle
     on lifecycle.activation_id = activation.activation_id
   join agent_graph_command command
     on command.thread_id = %s
@@ -120,7 +120,7 @@ select room.room_fencing_token
    and room.activation_id = %s
    and room.room_epoch = %s
    and room.room_fencing_token = %s
-   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.execution_mode = 'PRODUCTION'
    and command.room_fencing_token = room.room_fencing_token
    and command.command_hash = %s
    and command.command_envelope_hash = %s
@@ -129,12 +129,12 @@ select room.room_fencing_token
  for share of room, lifecycle, command
 """
 
-DRAIN_EXPIRED_TARGET_E2E_SQL: Final[str] = """
-update agent_graph_target_e2e_activation_lifecycle lifecycle
+DRAIN_EXPIRED_PRODUCTION_RUNTIME_SQL: Final[str] = """
+update agent_graph_production_runtime_activation_lifecycle lifecycle
    set lifecycle_state = 'DRAIN_ONLY',
        drain_only_at = coalesce(drain_only_at, activation.expires_at),
        updated_at = clock_timestamp()
-  from agent_graph_target_e2e_activation activation
+  from agent_graph_production_runtime_activation activation
  where lifecycle.activation_id = activation.activation_id
    and lifecycle.activation_id = %s
    and lifecycle.lifecycle_state = 'ACTIVE'
@@ -480,7 +480,7 @@ class TerminalResultMaterializer:
     request_hash: str
     draft: TerminalDraft
     bindings: ResultBindings
-    target_proposal_source: TargetE2ERoomProposalSource | None = None
+    target_proposal_source: ProductionRoomProposalSource | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -491,9 +491,9 @@ class TerminalResultMaterializer:
             raise TypeError("terminal result materializer bindings are invalid")
         if self.target_proposal_source is not None and not isinstance(
             self.target_proposal_source,
-            TargetE2ERoomProposalSource,
+            ProductionRoomProposalSource,
         ):
-            raise TypeError("target-E2E proposal source is invalid")
+            raise TypeError("production-runtime proposal source is invalid")
         object.__setattr__(self, "draft", draft)
 
     def materialize(
@@ -528,7 +528,7 @@ class TerminalResultMaterializer:
             if self.target_proposal_source is not None:
                 raise GraphBindingError("SHADOW terminal result cannot carry target proposal")
             return record
-        if fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if fence.execution_lane is not GraphGatewayMode.PRODUCTION:
             raise GraphBindingError("terminal result has an invalid execution lane")
         proposal_source = self.target_proposal_source
         if proposal_source is None:
@@ -537,7 +537,7 @@ class TerminalResultMaterializer:
             raise GraphBindingError("candidate terminal result requires execution identity")
         try:
             proposal_source.require_result_binding(result)
-            envelope = build_target_e2e_result_envelope(
+            envelope = build_production_runtime_result_envelope(
                 result,
                 activation_id=fence.activation_id or "",
                 room_fencing_token=fence.room_fencing_token or 0,
@@ -1617,9 +1617,9 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         )
 
     async def _lock_fence(self, connection: Any, fence: GraphFenceContext) -> None:
-        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if fence.execution_lane is GraphGatewayMode.PRODUCTION:
             await connection.execute(
-                DRAIN_EXPIRED_TARGET_E2E_SQL,
+                DRAIN_EXPIRED_PRODUCTION_RUNTIME_SQL,
                 (fence.activation_id,),
             )
         cursor = await connection.execute(
@@ -1634,10 +1634,10 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         row = await cursor.fetchone()
         if row is None:
             raise GraphFenceError("Graph lease is stale, expired, released, or cancelled")
-        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if fence.execution_lane is GraphGatewayMode.PRODUCTION:
             room_row = await (
                 await connection.execute(
-                    TARGET_E2E_ROOM_FENCE_SQL,
+                    PRODUCTION_RUNTIME_ROOM_FENCE_SQL,
                     (
                         fence.thread_id,
                         fence.command_id,
@@ -2364,7 +2364,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             "graph_proposal_hash": fence.proposal_hash,
             "graph_result_envelope_hash": fence.result_envelope_hash,
         }
-        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if fence.execution_lane is GraphGatewayMode.PRODUCTION:
             for key, value in candidate_expected.items():
                 if metadata.get(key) != value:
                     raise GraphBindingError(f"checkpoint metadata conflicts at {key}")

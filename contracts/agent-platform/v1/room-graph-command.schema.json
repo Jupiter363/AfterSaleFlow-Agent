@@ -73,7 +73,7 @@
                 "const": "dispute-intake-officer.parallel-frames.v1"
               },
               "output_schema_version": {
-                "const": "target-e2e-room-proposal-source.v2"
+                "const": "production-runtime-room-proposal-source.v2"
               }
             }
           },

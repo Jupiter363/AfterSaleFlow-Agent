@@ -328,8 +328,8 @@ class DemoCasePurgeMigrationIntegrationTest {
                                       and table_info.table_type = 'BASE TABLE'
                                       and column_info.table_name not in (
                                           'demo_case_purge_audit',
-                                          'target_e2e_case_id_claim',
-                                          'target_e2e_case_reservation'
+                                          'production_runtime_case_id_claim',
+                                          'production_runtime_case_reservation'
                                       )
                                     """)) {
                 while (result.next()) {
@@ -359,22 +359,22 @@ class DemoCasePurgeMigrationIntegrationTest {
             assertThat(functionDefinition)
                     .contains("delete from fulfillment_dispute_case");
             assertThat(functionDefinition)
-                    .doesNotContain("delete from target_e2e_case_id_claim")
-                    .doesNotContain("delete from target_e2e_case_reservation")
-                    .doesNotContain("delete from target_e2e_generated_case_tombstone");
+                    .doesNotContain("delete from production_runtime_case_id_claim")
+                    .doesNotContain("delete from production_runtime_case_reservation")
+                    .doesNotContain("delete from production_runtime_generated_case_tombstone");
             assertThat(functionDefinition.indexOf("delete from intake_parallel_frame_set"))
                     .isLessThan(
                             functionDefinition.indexOf(
-                                    "delete from target_e2e_finalization_receipt"));
+                                    "delete from production_runtime_finalization_receipt"));
             assertThat(
                             functionDefinition.indexOf(
-                                    "delete from target_e2e_finalization_receipt"))
+                                    "delete from production_runtime_finalization_receipt"))
                     .isLessThan(
                             functionDefinition.indexOf("delete from agent_execution_manifest"));
-            assertThat(functionDefinition.indexOf("delete from target_e2e_command_completion"))
+            assertThat(functionDefinition.indexOf("delete from production_runtime_command_completion"))
                     .isLessThan(
                             functionDefinition.indexOf(
-                                    "delete from target_e2e_command_admission"));
+                                    "delete from production_runtime_command_admission"));
             assertThat(
                             functionDefinition.indexOf(
                                     "delete from intake_parallel_graph_result_artifact"))

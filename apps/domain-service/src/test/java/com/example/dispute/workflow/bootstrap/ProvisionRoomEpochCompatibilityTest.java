@@ -12,7 +12,7 @@ import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochProvisioningMapper;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -194,9 +194,9 @@ class ProvisionRoomEpochCompatibilityTest {
                             7,
                             CaseProcessWorkflowProtocol.caseWorkflowId("tenant", caseId),
                             "p9-case-build",
-                            "all-rooms.target-e2e.v1",
+                            "all-rooms.production-runtime.v1",
                             TargetTypedRoomProtocol.GRAPH_VERSION,
-                            "target-e2e-checkpoint.v1",
+                            "production-runtime-checkpoint.v1",
                             "agent-stream.v2",
                             "room-epoch-selection.v2",
                             "case-process-contract.v1",

@@ -83,11 +83,11 @@ def request(
 
 def system_headers() -> dict[str, str]:
     secret = os.getenv("JAVA_SERVICE_SECRET") or os.getenv(
-        "TARGET_E2E_JAVA_SERVICE_SECRET"
+        "PRODUCTION_RUNTIME_JAVA_SERVICE_SECRET"
     )
     if not secret:
         pytest.skip(
-            "JAVA_SERVICE_SECRET or TARGET_E2E_JAVA_SERVICE_SECRET is required "
+            "JAVA_SERVICE_SECRET or PRODUCTION_RUNTIME_JAVA_SERVICE_SECRET is required "
             "for internal import E2E"
         )
     return {
@@ -444,7 +444,7 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         if (
             status != 409
             or opening.get("details", {}).get("reason_code")
-            != "TARGET_E2E_INTAKE_EPOCH_NOT_READY"
+            != "PRODUCTION_RUNTIME_INTAKE_EPOCH_NOT_READY"
         ):
             break
         time.sleep(1)

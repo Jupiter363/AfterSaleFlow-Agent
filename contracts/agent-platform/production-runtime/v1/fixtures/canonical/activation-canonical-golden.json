@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "production-runtime-activation-canonical-golden.v1",
+  "canonicalization": "RFC_8785",
+  "fixture": "../valid/production-runtime-activation-allowlist-valid.json",
+  "selfHashOmitFields": ["manifestHash"],
+  "manifestHash": "47f2b6c4cc47e2b8bba578e4480f01f000c235dcb9dfe5409a268acc7fb6cba1",
+  "activationJwsProtectedHeader": {
+    "alg": "ES256",
+    "kid": "p9-java-activation-key-01",
+    "typ": "production-runtime-activation+jwt"
+  },
+  "signatureFixtureStatus": "STRUCTURAL_GOLDEN_ONLY_NO_PRIVATE_KEY_OR_VALID_SIGNATURE"
+}

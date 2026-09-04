@@ -66,13 +66,13 @@ class ErrorCodeTest {
                                 ErrorCode.EXTERNAL_SERVICE_TIMEOUT,
                                 HttpStatus.GATEWAY_TIMEOUT),
                         Map.entry(
-                                ErrorCode.TARGET_E2E_ACTIVATION_UNAVAILABLE,
+                                ErrorCode.PRODUCTION_RUNTIME_ACTIVATION_UNAVAILABLE,
                                 HttpStatus.SERVICE_UNAVAILABLE),
                         Map.entry(
-                                ErrorCode.TARGET_E2E_ACTIVATION_EXPIRED,
+                                ErrorCode.PRODUCTION_RUNTIME_ACTIVATION_EXPIRED,
                                 HttpStatus.SERVICE_UNAVAILABLE),
                         Map.entry(
-                                ErrorCode.TARGET_E2E_CASE_CAPACITY_EXHAUSTED,
+                                ErrorCode.PRODUCTION_RUNTIME_CASE_CAPACITY_EXHAUSTED,
                                 HttpStatus.CONFLICT),
                         Map.entry(ErrorCode.DATABASE_ERROR, HttpStatus.INTERNAL_SERVER_ERROR),
                         Map.entry(ErrorCode.INTERNAL_ERROR, HttpStatus.INTERNAL_SERVER_ERROR));

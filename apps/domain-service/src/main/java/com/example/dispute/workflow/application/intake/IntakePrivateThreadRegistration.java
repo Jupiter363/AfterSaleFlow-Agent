@@ -3,7 +3,7 @@ package com.example.dispute.workflow.application.intake;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -86,10 +86,10 @@ public record IntakePrivateThreadRegistration(
                 && (writerMode != WriterMode.TEMPORAL
                         || !TargetTypedRoomProtocol.supportsGraphVersion(graphVersion)
                         || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion)
-                        || !"target-e2e-room-proposal-source.v2".equals(
+                        || !"production-runtime-room-proposal-source.v2".equals(
                                 outputSchemaVersion))) {
             throw new IllegalArgumentException(
-                    "target graph requires the exact TEMPORAL target-E2E version pins");
+                    "target graph requires the exact TEMPORAL production-runtime version pins");
         }
         if (LEGACY_GRAPH_KEY.equals(graphKey)
                 && !"intake-turn-proposal.v2".equals(outputSchemaVersion)) {

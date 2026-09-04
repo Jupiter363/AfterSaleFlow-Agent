@@ -44,7 +44,7 @@ public interface AgentConversationSessionRepository
                     """
                     select epoch.id
                       from case_room_epoch epoch
-                      join target_e2e_room_epoch_binding target_binding
+                      join production_runtime_room_epoch_binding target_binding
                         on target_binding.epoch_id = epoch.id
                        and target_binding.tenant_surrogate = epoch.tenant_surrogate
                        and target_binding.case_id = epoch.case_id
@@ -55,7 +55,7 @@ public interface AgentConversationSessionRepository
                        and epoch.room_type = 'INTAKE'
                        and epoch.writer_mode = 'TEMPORAL'
                        and epoch.lifecycle_status = 'ACTIVE'
-                       and target_binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+                       and target_binding.execution_lane = 'PRODUCTION'
                      order by epoch.room_epoch desc
                     """,
             nativeQuery = true)
@@ -66,7 +66,7 @@ public interface AgentConversationSessionRepository
                     """
                     select session.*
                       from case_room_epoch epoch
-                      join target_e2e_room_epoch_binding target_binding
+                      join production_runtime_room_epoch_binding target_binding
                         on target_binding.epoch_id = epoch.id
                        and target_binding.tenant_surrogate = epoch.tenant_surrogate
                        and target_binding.case_id = epoch.case_id
@@ -115,7 +115,7 @@ public interface AgentConversationSessionRepository
                        and epoch.writer_mode = 'TEMPORAL'
                        and epoch.lifecycle_status = 'ACTIVE'
                        and epoch.provisioning_status = 'READY'
-                       and target_binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+                       and target_binding.execution_lane = 'PRODUCTION'
                        and binding.actor_id = :actorId
                        and binding.actor_role = :actorRole
                        and binding.audience = :actorRole

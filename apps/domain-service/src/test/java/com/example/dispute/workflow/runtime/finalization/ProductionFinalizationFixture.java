@@ -1,0 +1,563 @@
+package com.example.dispute.workflow.runtime.finalization;
+
+import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakeEventReference;
+import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
+import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
+import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
+import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Usage;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationActivationPort.ActivationGrant;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationActivationPort.AuthorizationRequest;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationActivationPort.AuthorizationDecision;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationActivationPort.Lifecycle;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationActivationPort.RuntimeAttestation;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationRuntimeContextProvider.RuntimeContext;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.Instant;
+import java.util.List;
+import java.util.Set;
+
+final class ProductionFinalizationFixture {
+
+    static final Instant NOW = Instant.parse("2026-07-27T08:00:00Z");
+    static final String HASH = "a".repeat(64);
+    static final String RUN_ID = "RUN_PRODUCTION_RUNTIME";
+    static final String ATTEMPT_ID = "ATTEMPT_PRODUCTION_RUNTIME";
+    static final String RETRY_ATTEMPT_ID = "ATTEMPT_PRODUCTION_RUNTIME_RETRY";
+    static final String CASE_ID = "CASE_PRODUCTION_RUNTIME";
+    static final String TENANT = "tenant-production-runtime";
+    static final String ROOM_ID = "ROOM_PRODUCTION_RUNTIME";
+    static final String BUILD_ID = "production-runtime-agent-build";
+    static final String ACTIVATION_ID = "p9act.v1." + "1".repeat(32);
+    static final String ACTIVATION_MANIFEST_HASH = "9".repeat(64);
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .build()
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+    private ProductionFinalizationFixture() {}
+
+    static Fixture valid() {
+        return validAttempt(1, ATTEMPT_ID, "COMMAND_PRODUCTION_RUNTIME", "nonce-production-runtime", false);
+    }
+
+    static Fixture validParallel() {
+        return validAttempt(1, ATTEMPT_ID, "COMMAND_PRODUCTION_RUNTIME", "nonce-production-runtime", true);
+    }
+
+    static Fixture validRetry() {
+        return validAttempt(
+                2,
+                RETRY_ATTEMPT_ID,
+                "COMMAND_PRODUCTION_RUNTIME_RETRY",
+                "nonce-production-runtime-retry",
+                false);
+    }
+
+    private static Fixture validAttempt(
+            int attemptNo,
+            String attemptId,
+            String commandId,
+            String commandNonce,
+            boolean parallel) {
+        String threadId = "grt.v1." + "b".repeat(32);
+        var actor = new IntakePrivateThreadRegistration.ActorScope(
+                "user-production-runtime",
+                ActorRole.USER,
+                Audience.USER,
+                List.of("case:" + CASE_ID + ":command:INTAKE_MESSAGE"));
+        IntakeGraphThreadBinding binding = targetBinding(threadId, actor);
+        var snapshot = new IntakeSnapshotReference(
+                "SNAPSHOT_BINDING_PRODUCTION_RUNTIME",
+                binding.registration().registrationId(),
+                TENANT,
+                CASE_ID,
+                4,
+                91,
+                threadId,
+                binding.registration().actorScopeHash(),
+                binding.registration().agentSessionId(),
+                new RoomGraphCommand.SnapshotRef(
+                        "SNAPSHOT_PRODUCTION_RUNTIME",
+                        "intake-domain-snapshot.v2",
+                        "urn:intake:snapshot:production-runtime",
+                        "c".repeat(64),
+                        512),
+                "snapshot-version-1",
+                12,
+                8,
+                12,
+                3,
+                NOW.minusSeconds(50));
+        var event = new IntakeEventReference(
+                "EVENT_BINDING_PRODUCTION_RUNTIME",
+                binding.registration().registrationId(),
+                "EVENT_PRODUCTION_RUNTIME",
+                "MESSAGE_PRODUCTION_RUNTIME",
+                TENANT,
+                CASE_ID,
+                4,
+                91,
+                threadId,
+                binding.registration().actorScopeHash(),
+                binding.registration().agentSessionId(),
+                new RoomGraphCommand.SnapshotRef(
+                        "EVENT_PRODUCTION_RUNTIME",
+                        "intake-turn-event.v2",
+                        "urn:intake:event:production-runtime",
+                        "d".repeat(64),
+                        256),
+                "event-version-1",
+                4,
+                13,
+                Audience.USER,
+                NOW.minusSeconds(40),
+                NOW.minusSeconds(39));
+        RoomGraphCommand originCommand = command(
+                binding,
+                snapshot,
+                event,
+                "COMMAND_PRODUCTION_RUNTIME",
+                ATTEMPT_ID,
+                "nonce-production-runtime",
+                parallel);
+        RoomGraphCommand command = attemptNo == 1
+                ? originCommand
+                : command(
+                        binding,
+                        snapshot,
+                        event,
+                        commandId,
+                        attemptId,
+                        commandNonce,
+                        parallel);
+        ArtifactPointer proposal = new ArtifactPointer(
+                "intake.proposal." + HASH.substring(0, 32),
+                "intake-turn-proposal.v2",
+                "minio://production-runtime-intake-activation/graph-proposals/" + HASH + ".json",
+                HASH);
+        RoomGraphResult unsigned = new RoomGraphResult(
+                "room-graph-result.v1",
+                command.commandId(),
+                RUN_ID,
+                attemptId,
+                command.graphKey(),
+                command.graphVersion(),
+                "CHECKPOINT_PRODUCTION_RUNTIME",
+                9,
+                GraphStatus.COMPLETED,
+                List.of(),
+                List.of(new RoomGraphResult.ArtifactOperation(
+                        ArtifactOperationType.PROPOSE_PATCH, proposal)),
+                null,
+                null,
+                null,
+                "0".repeat(64),
+                new Usage(20, 10, 30),
+                new RoomGraphResult.ExecutionMetadata(
+                        command.invocationContext().promptProfileId(),
+                        command.invocationContext().modelProfileId(),
+                        command.invocationContext().outputSchemaVersion(),
+                        command.invocationContext().policyVersion(),
+                        command.invocationContext().guardrailVersion()));
+        RoomGraphResult graphResult = new RoomGraphResult(
+                unsigned.schemaVersion(),
+                unsigned.commandId(),
+                unsigned.logicalRunId(),
+                unsigned.attemptId(),
+                unsigned.graphKey(),
+                unsigned.graphVersion(),
+                unsigned.checkpointId(),
+                unsigned.cognitiveRevision(),
+                unsigned.status(),
+                unsigned.publicEventProposals(),
+                unsigned.artifactOperations(),
+                unsigned.needsInput(),
+                unsigned.needsReview(),
+                unsigned.error(),
+                IntakeContractHashes.graphResultHash(unsigned),
+                unsigned.usage(),
+                unsigned.executionMetadata());
+        var request = new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                RUN_ID,
+                attemptNo,
+                Math.max(1, attemptNo),
+                parallel ? "agent-stream.v4" : "agent-stream.v3",
+                "e".repeat(64),
+                attemptNo == 1 ? null : ATTEMPT_ID,
+                false,
+                0,
+                command);
+        var result = new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                RUN_ID,
+                RUN_ID,
+                attemptId,
+                attemptNo,
+                ExecuteAgentRunResult.Outcome.COMPLETED,
+                graphResult,
+                graphResult.outputHash(),
+                11,
+                true,
+                null,
+                false,
+                null,
+                NOW.minusSeconds(1));
+        var run = new ProductionIntakeFinalizationState.LogicalRun(
+                RUN_ID,
+                TENANT,
+                CASE_ID,
+                ROOM_ID,
+                "EPOCH_PRODUCTION_RUNTIME",
+                "INTAKE",
+                "key:production-runtime",
+                parallel ? "agent-stream.v4" : "agent-stream.v3",
+                "TEMPORAL_ACTIVITY",
+                "RESULT_READY",
+                "UNCOMMITTED",
+                4,
+                14,
+                91,
+                originCommand.requestHash(),
+                request.logicalInputHash(),
+                attemptId,
+                null,
+                graphResult.outputHash());
+        var attempt = new ProductionIntakeFinalizationState.Attempt(
+                attemptId,
+                RUN_ID,
+                attemptNo,
+                "RESULT_READY",
+                "TEMPORAL_ACTIVITY",
+                null,
+                graphResult.executionMetadata().modelProfileId(),
+                null,
+                graphResult.graphKey(),
+                graphResult.graphVersion(),
+                command.checkpointSchemaVersion(),
+                graphResult.checkpointId(),
+                graphResult.executionMetadata().promptVersion(),
+                graphResult.executionMetadata().schemaVersion(),
+                graphResult.executionMetadata().policyVersion(),
+                graphResult.executionMetadata().guardrailVersion(),
+                command.requestHash(),
+                command.commandId(),
+                command.requestHash(),
+                request.logicalInputHash(),
+                result.resultHash(),
+                true,
+                result.lastSequenceNo(),
+                123,
+                result.completedAt(),
+                command,
+                result);
+        var epoch = new ProductionIntakeFinalizationState.Epoch(
+                run.roomEpochId(),
+                TENANT,
+                CASE_ID,
+                ROOM_ID,
+                "INTAKE",
+                "TEMPORAL",
+                "ACTIVE",
+                "READY",
+                run.roomEpoch(),
+                run.processRevision(),
+                8,
+                run.fencingToken(),
+                command.graphKey(),
+                command.graphVersion(),
+                command.checkpointSchemaVersion(),
+                "agent-stream.v3");
+        var projection = new ProductionIntakeFinalizationState.Projection(
+                TENANT,
+                CASE_ID,
+                "INTAKE",
+                command.stageCode(),
+                "TEMPORAL",
+                "READY",
+                run.processRevision(),
+                run.roomEpoch(),
+                run.fencingToken(),
+                command.stageSequence());
+        var state = new ProductionIntakeFinalizationState(
+                run,
+                attempt,
+                epoch,
+                projection,
+                "REGISTERED",
+                "ACTIVE",
+                "ACTIVE",
+                "ACTIVE",
+                binding,
+                snapshot,
+                event,
+                new ArtifactPointer(
+                        "GRAPH_RESULT_PRODUCTION_RUNTIME",
+                        graphResult.schemaVersion(),
+                        "urn:graph-result:production-runtime",
+                        result.resultHash()));
+        ObjectNode proposalSource = MAPPER.createObjectNode();
+        proposalSource.put("schema_version", "production-runtime-room-proposal-source.v2");
+        proposalSource.put("room_type", "INTAKE");
+        ObjectNode normalizedProposal = proposalSource.putObject("proposal");
+        normalizedProposal.put("schema_version", "production-runtime-intake-proposal.v1");
+        normalizedProposal.put("proposal_id", "target-proposal." + HASH.substring(0, 32));
+        normalizedProposal.put("command_id", command.commandId());
+        normalizedProposal.put("logical_run_id", RUN_ID);
+        normalizedProposal.put("attempt_id", attemptId);
+        normalizedProposal.put("payload_schema_version", proposal.schemaVersion());
+        normalizedProposal.put(
+                "payload_ref", "urn:production-runtime:proposal:intake:" + proposal.sha256());
+        normalizedProposal.put("payload_hash", proposal.sha256());
+        normalizedProposal.put("terminal_class", "COMPLETED");
+        normalizedProposal.put("formal_authority", false);
+        String proposalHash = ContractJson.sha256Hex(normalizedProposal);
+
+        ObjectNode commandEnvelope = MAPPER.createObjectNode();
+        commandEnvelope.put("schema_version", "production-runtime-graph-command-envelope.v1");
+        commandEnvelope.put("execution_lane", ProductionExecutionLaneVerifier.EXECUTION_LANE);
+        commandEnvelope.put("activation_id", ACTIVATION_ID);
+        commandEnvelope.put("room_fencing_token", state.run().fencingToken());
+        commandEnvelope.put("command_hash", ContractJson.sha256Hex(MAPPER.valueToTree(command)));
+        commandEnvelope.set("command", MAPPER.valueToTree(command));
+        putSelfHash(commandEnvelope, "command_envelope_hash");
+
+        ObjectNode resultEnvelope = MAPPER.createObjectNode();
+        resultEnvelope.put("schema_version", "production-runtime-graph-result-envelope.v1");
+        resultEnvelope.put("execution_lane", ProductionExecutionLaneVerifier.EXECUTION_LANE);
+        resultEnvelope.put("activation_id", ACTIVATION_ID);
+        resultEnvelope.put("room_fencing_token", state.run().fencingToken());
+        resultEnvelope.put("command_hash", commandEnvelope.required("command_hash").textValue());
+        resultEnvelope.put(
+                "command_envelope_hash",
+                commandEnvelope.required("command_envelope_hash").textValue());
+        resultEnvelope.put("execution_provider", "production-runtime-provider");
+        resultEnvelope.put("execution_model", "production-runtime-model-1");
+        resultEnvelope.put("result_hash", result.resultHash());
+        resultEnvelope.put("proposal_hash", proposalHash);
+        resultEnvelope.put("graph_output_authority", "PROPOSAL_ONLY");
+        resultEnvelope.set("result", MAPPER.valueToTree(graphResult));
+        putSelfHash(resultEnvelope, "result_envelope_hash");
+
+        ObjectNode dbBinding = MAPPER.createObjectNode();
+        dbBinding.put("schema_version", "production-runtime-isolated-domain-db-binding.v1");
+        dbBinding.put("environment_id", "p9-isolated-preprod-01");
+        dbBinding.put("environment_generation", 7);
+        dbBinding.put("activation_id", ACTIVATION_ID);
+        dbBinding.put("binding_kind", "ISOLATED_DOMAIN_POSTGRESQL");
+        dbBinding.put("cluster_identity", "p9-domain-cluster-01");
+        dbBinding.put("database_identity", "p9-domain-db-01");
+        dbBinding.put("runtime_principal_identity", "p9-java-domain-runtime-01");
+        putSelfHash(dbBinding, "binding_hash");
+        var evidence = new ProductionFinalizationEvidence(
+                ACTIVATION_MANIFEST_HASH,
+                commandEnvelope,
+                resultEnvelope,
+                proposalSource,
+                dbBinding);
+        var runtime = new RuntimeContext(
+                TemporalAgentRunV2WorkflowLauncher.workflowId(RUN_ID),
+                "TEMPORAL_RUN_PRODUCTION_RUNTIME",
+                BUILD_ID,
+                ACTIVATION_ID,
+                ACTIVATION_MANIFEST_HASH,
+                dbBinding.required("binding_hash").textValue());
+        return new Fixture(request, result, state, runtime, proposal, evidence);
+    }
+
+    static AuthorizationDecision activeDecision(Fixture fixture) {
+        return decision(fixture, new ActivationGrant(
+                ACTIVATION_ID,
+                ProductionExecutionLaneVerifier.EXECUTION_LANE,
+                TENANT,
+                Set.of(CASE_ID),
+                Set.of(com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE),
+                BUILD_ID,
+                ProductionExecutionLaneVerifier.GRAPH_KEY,
+                ProductionExecutionLaneVerifier.GRAPH_VERSION,
+                ProductionExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION,
+                ACTIVATION_MANIFEST_HASH,
+                fixture.evidence().isolatedDomainDbBinding().required("binding_hash").textValue(),
+                Lifecycle.ACTIVE,
+                null,
+                NOW.minusSeconds(120),
+                NOW.plusSeconds(120),
+                null));
+    }
+
+    static AuthorizationDecision decision(Fixture fixture, ActivationGrant grant) {
+        return AuthorizationDecision.allowed(grant, runtimeAttestation(fixture, grant));
+    }
+
+    static RuntimeAttestation runtimeAttestation(Fixture fixture, ActivationGrant authority) {
+        RuntimeContext runtime = fixture.runtime();
+        boolean sameActivation = runtime.activationId().equals(authority.activationId());
+        return new RuntimeAttestation(
+                runtime.activationId(),
+                authority.activationId(),
+                ProductionExecutionLaneVerifier.EXECUTION_LANE,
+                authority.tenantSurrogate(),
+                authority.allowedRoomTypes(),
+                runtime.workflowBuildId(),
+                ProductionExecutionLaneVerifier.GRAPH_KEY,
+                ProductionExecutionLaneVerifier.GRAPH_VERSION,
+                ProductionExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION,
+                runtime.activationManifestHash(),
+                runtime.isolatedDomainDbBindingHash(),
+                sameActivation ? authority.lifecycle() : Lifecycle.ACTIVE,
+                sameActivation ? authority.issuedAt() : NOW.minusSeconds(120),
+                sameActivation ? authority.expiresAt() : NOW.plusSeconds(120),
+                sameActivation ? authority.revokedAt() : null);
+    }
+
+    static ProductionAuthorizedIntakeFinalizationSource authorizedSource(Fixture fixture) {
+        return new ProductionAuthorizedIntakeFinalizationSource(
+                (request, result) -> java.util.Optional.of(fixture.state()),
+                request -> activeDecision(fixture),
+                () -> fixture.runtime(),
+                new ProductionExecutionLaneVerifier(
+                        java.time.Clock.fixed(NOW, java.time.ZoneOffset.UTC)),
+                (request, result, runtime, state) -> fixture.evidence(),
+                new ProductionFinalizationBindingVerifier(MAPPER));
+    }
+
+    private static void putSelfHash(ObjectNode value, String field) {
+        ObjectNode preimage = value.deepCopy();
+        preimage.remove(field);
+        value.put(field, ContractJson.sha256Hex(preimage));
+    }
+
+    private static IntakeGraphThreadBinding targetBinding(
+            String threadId, IntakePrivateThreadRegistration.ActorScope actor) {
+        String actorScopeHash = IntakeContractHashes.actorScopeHash(actor);
+        var unsigned = new IntakePrivateThreadRegistration(
+                "graph-private-thread-registration.v1",
+                "REG_PRODUCTION_RUNTIME",
+                TENANT,
+                CASE_ID,
+                "INTAKE",
+                4,
+                threadId,
+                actor,
+                actorScopeHash,
+                "SESSION_PRODUCTION_RUNTIME",
+                ProductionExecutionLaneVerifier.GRAPH_KEY,
+                ProductionExecutionLaneVerifier.GRAPH_VERSION,
+                ProductionExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION,
+                "intake-graph-state.v2",
+                "intake-prompt.v2",
+                "intake-model.production-runtime.v1",
+                "production-runtime-room-proposal-source.v2",
+                "intake-policy.v2",
+                "intake-guardrail.v2",
+                "no-tools.v1",
+                WriterMode.TEMPORAL,
+                NOW.minusSeconds(60),
+                "0".repeat(64));
+        var registration = new IntakePrivateThreadRegistration(
+                unsigned.schemaVersion(),
+                unsigned.registrationId(),
+                unsigned.tenantSurrogate(),
+                unsigned.caseId(),
+                unsigned.roomType(),
+                unsigned.roomEpoch(),
+                unsigned.threadId(),
+                unsigned.actorScope(),
+                unsigned.actorScopeHash(),
+                unsigned.agentSessionId(),
+                unsigned.graphKey(),
+                unsigned.graphVersion(),
+                unsigned.checkpointSchemaVersion(),
+                unsigned.stateSchemaVersion(),
+                unsigned.promptVersion(),
+                unsigned.modelProfileId(),
+                unsigned.outputSchemaVersion(),
+                unsigned.policyVersion(),
+                unsigned.guardrailVersion(),
+                unsigned.toolPolicyVersion(),
+                unsigned.writerMode(),
+                unsigned.issuedAt(),
+                IntakeContractHashes.registrationHash(unsigned));
+        return new IntakeGraphThreadBinding(registration, 91);
+    }
+
+    private static RoomGraphCommand command(
+            IntakeGraphThreadBinding binding,
+            IntakeSnapshotReference snapshot,
+            IntakeEventReference event,
+            String commandId,
+            String attemptId,
+            String commandNonce,
+            boolean parallel) {
+        return new IntakeGraphCommandFactory().create(
+                new IntakeGraphCommandFactory.CommandRequest(
+                        commandId,
+                        RUN_ID,
+                        attemptId,
+                        parallel ? ROOM_ID : null,
+                        binding,
+                        snapshot,
+                        event,
+                        14,
+                        "INTAKE_ACTIVE",
+                        7,
+                        parallel
+                                ? RoomGraphCommand.PARALLEL_INTAKE_AGENT_PROFILE_ID
+                                : "intake-agent.v2",
+                        parallel ? RoomGraphCommand.PARALLEL_INTAKE_PROVIDER_ATTEMPT_LIMIT : 2,
+                        3,
+                        1,
+                        NOW.plusSeconds(300),
+                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                        "graph-envelope.production-runtime.v1",
+                        commandNonce));
+    }
+
+    record Fixture(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            ProductionIntakeFinalizationState state,
+            RuntimeContext runtime,
+            ArtifactPointer proposal,
+            ProductionFinalizationEvidence evidence) {
+
+        AuthorizationRequest authorizationRequest() {
+            var verified = new ProductionFinalizationBindingVerifier(MAPPER)
+                    .verify(request, result, state, evidence);
+            return new AuthorizationRequest(
+                    TENANT,
+                    CASE_ID,
+                    ROOM_ID,
+                    com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE,
+                    RUN_ID,
+                    runtime.workflowId(),
+                    runtime.workflowRunId(),
+                    runtime.workflowBuildId(),
+                    request.command().commandId(),
+                    verified.commandHash(),
+                    verified.commandEnvelopeHash(),
+                    request.command().roomEpoch(),
+                    state.run().fencingToken(),
+                    verified.graphActivationId());
+        }
+    }
+}

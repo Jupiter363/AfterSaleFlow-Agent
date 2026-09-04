@@ -23,7 +23,7 @@
 </div>
 
 > **文档基线**：`main`，截至 2026-09-04；代码、合同与文档以当前 `main` 提交共同构成发布基线。
-> **合同基线**：当前生产合同组合统一为 `production-contract-baseline.v1`；具体 wire/schema 版本保持不可变，用于兼容和重放。
+> **合同基线**：当前生产合同组合统一为 `production-contract-baseline.v1`。本次是首次生产 clean break：旧 `target-e2e` UAT 身份不再兼容；从该基线开始，各 wire/schema 版本保持不可变，用于生产重放与后续演进。
 > **当前 UAT 基线**：接待室 V4 三 Frame 并行图已在全新浏览器案件 `CASE_P9_6A98633E_11` 上完成六站全链路验证；该结论属于隔离 UAT 证据，不等同于默认生产开关已开启。
 > **重要边界**：所有模型输出均为结构化建议或草案；最终裁决由平台人工终审确认，高影响动作只能由审批后、哈希绑定且幂等的 Tool Executor 执行。
 
@@ -44,7 +44,7 @@ AfterSaleFlow-Agent 是一个面向**用户与商家履约争端**的 AI Native 
 | 目标 | 设计回答 |
 | --- | --- |
 | 业务事实不能被模型覆盖 | Java 与 PostgreSQL 是身份、消息、证据、裁决、审核、执行和审计的正式事实源 |
-| 长流程不能依赖进程存活 | Temporal 管理持久等待、Signal、Timer、重试和恢复；默认路径继续受开关保护，Case/Room 候选路径已完成隔离 UAT |
+| 长流程不能依赖进程存活 | Temporal 管理持久等待、Signal、Timer、重试和恢复；生产 Case/Room 路径已完成隔离 UAT，发布仍受显式门禁保护 |
 | Agent 不能获得无限权限 | 每个角色使用默认拒绝的 Agent Profile，显式限定状态、上下文、Skill、工具、预算和输出 Schema |
 | 流式输出不能直接成为正式结果 | Python 输出先作为 provisional stream；只有 Java Finalizer 验收并持久化的 final 才能成为正式消息或工件 |
 | 高影响动作必须可控 | 人工终审 → 审批策略 → Tool Executor → ActionRecord，Agent 无退款、补发、驳回、关单或审批权限 |
@@ -58,14 +58,14 @@ AfterSaleFlow-Agent 是一个面向**用户与商家履约争端**的 AI Native 
 | --- | --- |
 | 生产 Contract Baseline | `production-contract-baseline.v1`；统一目录，不重写持久化 wire/schema 版本 |
 | 接待室认知图 | 新 epoch 使用 `PARALLEL_FRAMES_V1`：V4 三个显式兄弟 Frame `DIALOGUE_FRAME`、`DOSSIER_FRAME`、`QUALITY_FRAME`；独立校验后由受权威约束的合并路径提交 |
-| Graph / Stream 身份 | `target-e2e-graph.2026-08-18.3`；Intake 并行流使用 `agent-stream.v4`，其余目标房间继续使用 `agent-stream.v3` |
+| Graph / Stream 身份 | `production-runtime-graph.2026-08-18.3`；Intake 并行流使用 `agent-stream.v4`，Evidence、Hearing 与 Outcome 使用 `agent-stream.v3` |
 | Evidence 合同 | `evidence_room_context.v2`、`evidence_turn_stream.v3`、`evidence-turn-result.v3` |
 | 模型配置 | LiteLLM 统一路由 `qwen3.8-flash`；默认关闭 thinking，并启用严格 JSON Schema |
 | 运行时依赖 | Java 21、Spring Boot `3.5.15`、Temporal Java SDK `1.35.0`；Python 3.11、LangGraph `1.2.6`、LangChain Core `1.4.9` |
-| 数据库版本 | Java Flyway 迁移上限 `V094__target_e2e_graph_patch_release_identity.sql` |
+| 数据库版本 | Java Flyway 迁移上限 `V094__production_runtime_graph_patch_release_identity.sql` |
 | 浏览器 UAT | 从前端表单创建全新案件，经双方接待、证据、庭审、人工终审到 Outcome，进度达到 `6 / 6` |
 
-运行平台需要与源码版本分开理解：仓库 Compose 默认仍固定 `temporalio/auto-setup:1.25.2`；上述 deployment-pinned UAT 在经单独授权升级并验证的 Temporal Server `1.29.7` 上完成。仓库不会在启动时自动替换核心组件版本。
+运行平台需要与源码版本分开理解：仓库 Compose 默认仍固定 `temporalio/auto-setup:1.25.2`；上述 deployment-pinned UAT 在经单独授权升级并验证的 Temporal Server `1.29.7` 上完成。仓库不会在启动时自动替换核心组件版本，生产平台升级必须单独授权。
 
 ---
 
@@ -219,7 +219,7 @@ sequenceDiagram
 | 状态类别 | 权威边界 | 说明 |
 | --- | --- | --- |
 | 正式领域事实 | **Java + Domain PostgreSQL** | 身份、权限、消息、证据、提交、冻结工件、审核决定、执行记录和查询投影 |
-| 持久业务过程 | **Temporal Event History** | 负责案件/房间阶段、等待、Timer、取消、重试、补偿与命令顺序；Case/Room 候选路径已完成隔离 UAT，生产启用仍由门禁控制 |
+| 持久业务过程 | **Temporal Event History** | 负责案件/房间阶段、等待、Timer、取消、重试、补偿与命令顺序；生产 Case/Room 路径已完成隔离 UAT，启用仍由发布门禁控制 |
 | 认知执行状态 | **Python LangGraph + Graph PostgreSQL** | 负责 checkpoint、认知 revision、命令结果、上下文摘要与有界 fan-out；Intake V4 使用三个独立 Frame 并行执行 |
 | 模型对象流 | **LangChain Core / LCEL** | Prompt、Message、ChatModel、Parser、stream、callback 与 tracing，不拥有领域权限或阶段推进权 |
 | 证据二进制 | **MinIO** | 原始证据、脱敏证据、OCR 临时文件、政策文件和导出文件分桶管理 |
@@ -251,14 +251,11 @@ agent-execution
 notification-and-tools
 ```
 
-当前 `main` 的默认业务路径仍以 Java 状态机为主，Temporal 已实际管理 2 小时举证窗口、双方完成 Signal、提醒与到期 Activity；`case-dispute-task-queue` 是 EvidenceWindow 的兼容队列。仓库同时提供 Case/Room Workflow、命令 outbox、单调 revision、fencing、Continue-As-New 与投影 reconciliation，并已在隔离 `TARGET_E2E_CANDIDATE` 中走通完整浏览器流程；默认生产开关仍保持 fail-closed。
+当前生产运行时由 Java 领域状态机、Temporal Case/Room Workflow 和 Python Graph Runtime 共同组成。Temporal 管理等待、Signal、Timer、重试、Continue-As-New 与恢复；Java 继续独占正式领域写入；Python 只提交 proposal。`case-dispute-task-queue` 仅保留给需要迁移的旧 EvidenceWindow History，新建生产环境不得向该兼容队列投递。
 
 ### 4. Python 认知平面
 
-Python Agent Service 只暴露内部 FastAPI 接口，承担两类执行：
-
-- **默认正式路径**：接待与证据使用受治理的单轮 LangGraph；庭审由四个显式 Hearing Graph Family 承载七个一次调用操作，但 15 阶段 cursor、等待和正式工件提交仍由 Java 管理；另包含 Review Copilot 与离线 Evaluation。
-- **隔离 UAT 候选**：Intake V4 将对话、卷宗与质量评估拆为三个并行 Frame，使用 `agent-stream.v4` 提交独立帧结果；Evidence、Hearing 与 Outcome 使用持久 Graph Gateway 和 `agent-stream.v3`。候选平台具备 PostgreSQL checkpoint、命令账本、lease/fencing、版本注册表和 proposal-only 跨服务协议。
+Python Agent Service 只暴露内部 FastAPI 接口。正式 Intake V4 将对话、卷宗与质量评估拆为三个并行 Frame，使用 `agent-stream.v4` 提交独立帧结果；Evidence、Hearing 与 Outcome 使用持久 Graph Gateway 和 `agent-stream.v3`。运行时具备 PostgreSQL checkpoint、命令账本、lease/fencing、版本注册表和 proposal-only 跨服务协议；庭审 15 阶段 cursor、等待和正式工件提交仍由 Java 管理。
 
 Hearing 认知拓扑按职责拆成四个显式 family：
 
@@ -271,19 +268,17 @@ hearing.jury.v1     -> jury review
 
 每个拓扑都是显式 typed `StateGraph`，未知路由失败关闭；证据 fan-out 使用稳定键 reducer 和有界并发，不允许最后写入覆盖冲突。
 
-### 5. 当前默认路径与目标候选路径
+### 5. 基础源码与生产运行构件
 
-| 维度 | 当前默认正式路径 | 目标架构候选路径 |
+| 维度 | 可复用基础层 | 生产运行构件 |
 | --- | --- | --- |
-| 流程所有权 | Java 状态机；Temporal 实际管理 EvidenceWindow | Temporal Case/Room Workflow 管理宏观阶段、等待与恢复 |
-| Agent 状态 | 单轮图；跨回合事实由 Java 持久化 | Graph PostgreSQL checkpoint + command ledger + lease/fencing；Intake 为三 Frame 并行图 |
-| 庭审 Python | 四个显式 Graph Family 承载七个有界、一次调用操作；不持有 15 阶段流程状态 | 同一认知拓扑接入 Graph Gateway、PostgreSQL checkpoint、命令账本和 proposal-only 跨服务传输 |
-| 流式协议 | `agent_stream.v1` 兼容路径 | `agent-stream.v3`；Intake V4 专用 `agent-stream.v4` Frame 协议 |
-| Graph Gateway | 默认 `DISABLED` | 签名 synthetic `SHADOW` 或隔离预生产 `TARGET_E2E_CANDIDATE` |
-| 正式领域写入 | 始终只有 Java | 始终只有 Java Finalizer；Graph 仍是 proposal-only |
-| 部署授权 | Docker Compose 本地/CI 默认拓扑 | 隔离预生产候选已完成浏览器 UAT；生产 promotion gate 仍需完整发布证据和明确批准 |
+| Java 源码 | `apps/domain-service/src/main`：领域账本、API、Workflow 与通用适配器 | `apps/domain-service/src/production-runtime`：显式装配生产 Bean、Worker 注册和激活校验 |
+| Java 构件 | 默认 JAR 用于开发、编译和通用测试 | Maven `production-runtime` profile 生成 `*-production-runtime.jar`，生产镜像只启动该构件 |
+| Python Graph | 通用 gateway、checkpoint、executor 与房间 Graph | `production_runtime*` 模块绑定正式四房间图和 `PRODUCTION` execution lane |
+| 数据 | 开发环境可使用本地默认库 | 首次生产 clean break 必须使用全新 Domain/Graph 数据库和全新 Temporal namespace |
+| 发布门禁 | 默认开关继续 fail-closed | 生产配置显式提供签名激活、版本绑定、数据库隔离和 Worker 路由权威 |
 
-这一区分是项目可信度的重要组成部分：仓库包含面向生产终态的高强度工程实现和验证合同，但不会把默认关闭的候选能力包装成已经上线的生产事实。
+`production-runtime` 不是测试源码集，也不是兼容层；它是当前生产应用的装配边界。UAT 工具位于 `tools/uat/production-runtime`，与生产代码所有权明确分离。
 
 ### 6. Schema-first 跨服务合同
 
@@ -299,7 +294,7 @@ hearing.jury.v1     -> jury review
 - `graph-reconcile-response`
 - compatibility matrix 与正反向 fixtures
 
-目标路径使用 RFC 8785 JSON Canonicalization 与 SHA-256 绑定请求、结果和工件；Java 与 Pydantic 类型在接收端再次验证 Schema、ID、版本、作用域和哈希。跨服务接口传递引用和摘要，而不是把完整证据、矩阵或 PII 放进 Temporal History。
+生产路径使用 RFC 8785 JSON Canonicalization 与 SHA-256 绑定请求、结果和工件；Java 与 Pydantic 类型在接收端再次验证 Schema、ID、版本、作用域和哈希。跨服务接口传递引用和摘要，而不是把完整证据、矩阵或 PII 放进 Temporal History。
 
 ---
 
@@ -400,6 +395,10 @@ Browser -> Java Command -> Outbox/Temporal -> AgentRun
 AfterSaleFlow-Agent/
 ├── apps/                        # 所有可部署应用
 │   ├── domain-service/          # Java 领域账本、API、Temporal Workflow/Worker
+│   │   └── src/
+│   │       ├── main/            # 可复用领域与运行时核心
+│   │       ├── production-runtime/ # 正式生产装配源码集
+│   │       └── test/            # Java 单元/集成测试
 │   ├── agent-runtime/           # Python Agent、LangGraph、模型与 Graph Runtime
 │   ├── web/                     # Vue 六站争议旅程与审核工作台
 │   └── ocr-parser/              # 图片、PDF、Word、Excel 解析
@@ -408,8 +407,8 @@ AfterSaleFlow-Agent/
 │   └── agent-platform/          # 按领域和协议版本组织的机器合同
 ├── infra/                       # 环境和部署资产
 │   ├── services/                # Temporal、PostgreSQL、Redis、MinIO 等基础服务配置
-│   ├── compose/                 # 隔离 E2E Compose
-│   ├── environments/            # Target E2E 环境资源
+│   ├── compose/                 # 隔离环境 Compose（含 production-runtime UAT）
+│   ├── environments/            # 环境资源（生产运行时 UAT 资源显式带 uat 后缀）
 │   ├── kubernetes/              # 生产 Kubernetes 清单
 │   └── observability/           # 告警、指标与 Dashboard
 ├── tools/                       # 开发、生成、验证、UAT 与恢复工具
@@ -496,7 +495,7 @@ CONFIRM_RESET=YES ./tools/dev/dev-reset.sh
 .\tools\dev\dev-local.ps1 -Stop
 ```
 
-本地 Vite `5173` 会代理 Java `8080`；Docker 全量环境必须从 Nginx `18080` 进入。隔离 target-E2E 运维拓扑可能使用 Java `8081`，它不是普通本地开发或默认生产入口。
+本地 Vite `5173` 会代理 Java `8080`；Docker 全量环境必须从 Nginx `18080` 进入。隔离 production-runtime 运维拓扑可能使用 Java `8081`，它不是普通本地开发或默认生产入口。
 
 ---
 
@@ -614,12 +613,13 @@ python -m pytest tests/integration/api tests/e2e tests/performance -q
 
 ## 当前边界与非目标
 
-为避免把工程候选能力包装成已经上线的生产事实，当前 `main` 明确保持以下边界：
+当前 `main` 将 `production-runtime` 作为正式代码基线，同时明确保持以下发布边界：
 
 - 当前不实现申诉/复审业务。
 - 当前正式庭审仍由 Java 持有 15 阶段 cursor、等待和正式工件写入；Python 通过四个显式 Graph Family 执行七个受治理操作，但不拥有流程推进权。
-- 当前默认路径由 Temporal 承担举证窗口；全房间 Temporal-first 已在隔离候选路径完成 UAT，但仍需按迁移与生产门禁显式启用。
-- Graph PostgreSQL、版本化 AgentRun 和 `TARGET_E2E_CANDIDATE` 是默认关闭的候选/隔离预生产路径。
+- 全房间 Temporal-first 与 Intake V4 并行图已经完成隔离 UAT；部署时仍必须显式提供生产激活、Graph DB 和 Worker 版本权威。
+- `GRAPH_GATEWAY_MODE=PRODUCTION` 不由普通本地启动隐式开启；缺少生产权威时必须 fail-closed。
+- 本次首次生产基线不兼容旧 UAT 的 `target-e2e` 标识或持久状态；部署必须使用新数据库和新 Temporal namespace，禁止原地猜测迁移。
 - Temporal Server `1.29.7` 是本轮经授权的 UAT 平台证据，不是仓库默认配置；README 与启动脚本不得被视为核心组件升级授权。
 - 当前本地和 CI 使用 Docker Compose；仓库不以本版本宣称 Kubernetes 生产 HA 已落地。
 - 当前不引入 Kafka、MCP 或向量数据库。

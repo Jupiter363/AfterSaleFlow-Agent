@@ -100,7 +100,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String FORMAL_EVENT_REJECTION_RECOVERY_CHANGE_ID =
       "intake-room-formal-event-rejection-recovery-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
-      "target-e2e-room-proposal-source.v2";
+      "production-runtime-room-proposal-source.v2";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
   private static final int POST_COMMIT_RECONCILIATION_ATTEMPTS = 5;
@@ -576,7 +576,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void processTargetSourceEvent(TargetIntakeSourceEventRef event) {
-    if (!start.targetE2eCandidate()) {
+    if (!start.productionCandidate()) {
       protocolErrorCode = "TARGET_SOURCE_EVENT_LANE_NOT_AUTHORIZED";
       return;
     }

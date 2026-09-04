@@ -37,13 +37,13 @@ class OutcomeUnregisteredAssemblyGuardTest {
       JAVA_MAIN + "/com/example/dispute/workflow/contract/outcome/v1/OutcomeRoomProtocol.java";
   private static final String TARGET_TYPED_DISPATCHER_SOURCE =
       JAVA_MAIN
-          + "/com/example/dispute/workflow/targete2e/temporal/"
+          + "/com/example/dispute/workflow/runtime/temporal/"
           + "TargetTypedRoomCaseProcessDispatcher.java";
   private static final String TARGET_TYPED_PROTOCOL_SOURCE =
       JAVA_MAIN
-          + "/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java";
-  private static final String TARGET_E2E_OUTCOME_GRAPH_ADAPTER =
-      PYTHON_APP + "/graph_runtime/target_e2e_room_adapters.py";
+          + "/com/example/dispute/workflow/runtime/temporal/TargetTypedRoomProtocol.java";
+  private static final String PRODUCTION_RUNTIME_OUTCOME_GRAPH_ADAPTER =
+      PYTHON_APP + "/graph_runtime/production_runtime_room_adapters.py";
 
   private static final List<String> ENGINEERING_BOUNDARY_SOURCES =
       List.of(
@@ -246,31 +246,31 @@ class OutcomeUnregisteredAssemblyGuardTest {
               1),
           temporalAllowance(
               TARGET_TYPED_DISPATCHER_SOURCE,
-              "target-only Intake child stub",
+              "production-only Intake child stub",
               "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
                   + "IntakeRoomWorkflow\\s*\\.\\s*class\\s*,",
               1),
           temporalAllowance(
               TARGET_TYPED_DISPATCHER_SOURCE,
-              "target-only Evidence child stub",
+              "production-only Evidence child stub",
               "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
                   + "EvidenceRoomWorkflow\\s*\\.\\s*class\\s*,",
               1),
           temporalAllowance(
               TARGET_TYPED_DISPATCHER_SOURCE,
-              "target-only Hearing child stub",
+              "production-only Hearing child stub",
               "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
                   + "HearingRoomWorkflow\\s*\\.\\s*class\\s*,",
               1),
           temporalAllowance(
               TARGET_TYPED_DISPATCHER_SOURCE,
-              "target-only Review/Outcome child stub",
+              "production-only Review/Outcome child stub",
               "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
                   + "OutcomeRoomWorkflow\\s*\\.\\s*class\\s*,",
               1),
           temporalAllowance(
               TARGET_TYPED_DISPATCHER_SOURCE,
-              "target-only Agent Run child stub",
+              "production-only Agent Run child stub",
               "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
                   + "AgentRunWorkflow\\s*\\.\\s*class\\s*,",
               1),
@@ -927,7 +927,7 @@ class OutcomeUnregisteredAssemblyGuardTest {
 
   private static List<String> pythonAssemblyViolations(String source, String content) {
     List<ForbiddenPattern> patterns = FORBIDDEN_PYTHON_ASSEMBLY;
-    if (TARGET_E2E_OUTCOME_GRAPH_ADAPTER.equals(source)) {
+    if (PRODUCTION_RUNTIME_OUTCOME_GRAPH_ADAPTER.equals(source)) {
       patterns =
           patterns.stream()
               .filter(pattern -> !pattern.description().equals("Outcome graph import"))

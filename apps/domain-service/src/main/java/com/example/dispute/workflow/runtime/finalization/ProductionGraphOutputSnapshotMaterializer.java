@@ -1,0 +1,349 @@
+package com.example.dispute.workflow.runtime.finalization;
+
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import java.net.URI;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import javax.sql.DataSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+/**
+ * Persists the exact durable FINAL-result reference as the AgentRun output snapshot.
+ *
+ * <p>The target finalizer cannot use a URI carried by an in-memory graph result: only the
+ * append-validated terminal stream record is an admissible output source. The caller executes
+ * its finalization callback inside this same transaction, so the state reader observes the
+ * snapshot without creating a separately committed provenance row.
+ */
+public final class ProductionGraphOutputSnapshotMaterializer {
+
+    private static final String LOCK_RUN_SQL = """
+            select id
+              from agent_run
+             where id = :agentRunId
+             for update
+            """;
+
+    private static final String LOAD_SQL = """
+            select id, room_type, snapshot_type, source_type, source_id, schema_version,
+                   object_uri, object_version, content_sha256, size_bytes, content_type,
+                   visibility, created_by
+              from immutable_payload_snapshot
+             where tenant_surrogate = :tenantSurrogate
+               and source_type = 'AGENT_RUN'
+               and source_id = :agentRunId
+             for update
+            """;
+
+    private static final String INSERT_SQL = """
+            insert into immutable_payload_snapshot (
+                id, tenant_surrogate, case_id, room_type, snapshot_type,
+                source_type, source_id, schema_version, object_uri, object_version,
+                content_sha256, size_bytes, content_type, visibility,
+                legal_hold, created_at, created_by
+            ) values (
+                :id, :tenantSurrogate, :caseId, :roomType, 'AGENT_OUTPUT',
+                'AGENT_RUN', :agentRunId, :schemaVersion, :resultRef, null,
+                :resultHash, 0, 'application/json', 'INTERNAL',
+                false, now(), 'production-runtime-agent-output-materializer'
+            )
+            """;
+
+    /*
+     * A target Intake thread is admitted provisionally at ingress. It becomes registered only
+     * after this finalizer has verified and persisted the durable FINAL output. The immutable
+     * command tuple prevents a finalization for another epoch, actor, or graph pin from moving
+     * this row.
+     */
+    private static final String LOCK_INTAKE_BINDING_SQL = """
+            select registration_id, registration_status, registered_at
+              from case_intake_graph_thread_binding
+             where tenant_surrogate = :tenantSurrogate
+               and case_id = :caseId
+               and room_type = 'INTAKE'
+               and room_epoch = :roomEpoch
+               and thread_id = :threadId
+               and actor_id = :actorId
+               and actor_role = :actorRole
+               and audience = :audience
+               and actor_scope_hash = :actorScopeHash
+               and graph_key = :graphKey
+               and graph_version = :graphVersion
+               and checkpoint_schema_version = :checkpointSchemaVersion
+             for update
+            """;
+
+    private static final String REGISTER_INTAKE_BINDING_SQL = """
+            update case_intake_graph_thread_binding
+               set registration_status = 'REGISTERED',
+                   registered_at = current_timestamp
+             where registration_id = :registrationId
+               and tenant_surrogate = :tenantSurrogate
+               and case_id = :caseId
+               and room_type = 'INTAKE'
+               and room_epoch = :roomEpoch
+               and thread_id = :threadId
+               and actor_id = :actorId
+               and actor_role = :actorRole
+               and audience = :audience
+               and actor_scope_hash = :actorScopeHash
+               and graph_key = :graphKey
+               and graph_version = :graphVersion
+               and checkpoint_schema_version = :checkpointSchemaVersion
+               and registration_status = 'PENDING'
+               and registered_at is null
+            """;
+
+    private static final String CREATED_BY = "production-runtime-agent-output-materializer";
+    private static final Set<String> ALLOWED_URI_SCHEMES = Set.of("s3", "minio", "urn");
+
+    private final NamedParameterJdbcTemplate jdbc;
+    private final ProductionDurableFinalAuthorityResolver durableFinalAuthority;
+    private final TransactionTemplate transactions;
+
+    public ProductionGraphOutputSnapshotMaterializer(
+            DataSource dataSource,
+            AgentRunV2StreamStore streamStore,
+            PlatformTransactionManager transactionManager) {
+        this(
+                dataSource,
+                new V3ProductionDurableFinalAuthorityResolver(streamStore),
+                transactionManager);
+    }
+
+    public ProductionGraphOutputSnapshotMaterializer(
+            DataSource dataSource,
+            ProductionDurableFinalAuthorityResolver durableFinalAuthority,
+            PlatformTransactionManager transactionManager) {
+        this.jdbc = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.durableFinalAuthority = Objects.requireNonNull(
+                durableFinalAuthority, "durableFinalAuthority");
+        this.transactions = new TransactionTemplate(Objects.requireNonNull(
+                transactionManager, "transactionManager"));
+        this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
+        this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    }
+
+    /** Materializes the output then invokes finalization under the same writable transaction. */
+    public <T> T materializeThen(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            TransactionalFinalization<T> finalization) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(result, "result");
+        Objects.requireNonNull(finalization, "finalization");
+        T value = transactions.execute(ignored -> {
+            materialize(request, result);
+            return finalization.finalizeResult();
+        });
+        return Objects.requireNonNull(value, "target finalization returned null");
+    }
+
+    /**
+     * Materializes under the caller's already-active target finalization transaction.
+     *
+     * <p>The multi-room gateway uses this method so the stream-derived snapshot, domain commit,
+     * target receipt, and admission completion share one physical transaction.
+     */
+    public void materializeInActiveTransaction(
+            ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(result, "result");
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            throw new IllegalStateException(
+                    "target output snapshot requires the active writable Finalizer transaction");
+        }
+        materialize(request, result);
+    }
+
+    private void materialize(ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
+        if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED
+                || result.graphResult() == null
+                || !request.agentRunId().equals(result.agentRunId())
+                || !request.logicalRunId().equals(result.logicalRunId())
+                || !request.attemptId().equals(result.attemptId())
+                || request.attemptNo() != result.attemptNo()
+                || !result.resultHash().equals(result.graphResult().outputHash())) {
+            throw new IllegalArgumentException("target graph output snapshot input is invalid");
+        }
+        lockLogicalRun(request.agentRunId());
+        String resultRef = durableFinalAuthority.requireResultRef(request, result);
+        if (!immutableUri(resultRef)) {
+            throw new IllegalStateException(
+                    "target AgentRun durable final has an invalid result reference");
+        }
+        Map<String, ?> parameters = Map.of(
+                "id", snapshotId(request.agentRunId(), result.resultHash()),
+                "tenantSurrogate", request.command().tenantSurrogate(),
+                "caseId", request.command().caseId(),
+                "roomType", request.command().roomType().name(),
+                "agentRunId", request.agentRunId(),
+                "schemaVersion", result.graphResult().schemaVersion(),
+                "resultRef", resultRef,
+                "resultHash", result.resultHash());
+        List<SnapshotRow> existing = jdbc.query(LOAD_SQL, parameters, (rs, ignored) -> new SnapshotRow(
+                rs.getString("id"),
+                rs.getString("room_type"),
+                rs.getString("snapshot_type"),
+                rs.getString("source_type"),
+                rs.getString("source_id"),
+                rs.getString("schema_version"),
+                rs.getString("object_uri"),
+                rs.getString("object_version"),
+                rs.getString("content_sha256"),
+                rs.getLong("size_bytes"),
+                rs.getString("content_type"),
+                rs.getString("visibility"),
+                rs.getString("created_by")));
+        if (existing.isEmpty()) {
+            if (jdbc.update(INSERT_SQL, parameters) != 1) {
+                throw new IllegalStateException("target AgentRun graph output snapshot was not inserted");
+            }
+        } else if (existing.size() != 1 || !existing.getFirst().matches(parameters)) {
+            throw new IllegalStateException("target AgentRun graph output snapshot conflicts with replay");
+        }
+        registerVerifiedIntakeBinding(request);
+    }
+
+    private void registerVerifiedIntakeBinding(ExecuteAgentRunRequest request) {
+        if (request.command().roomType() != RoomType.INTAKE) {
+            return;
+        }
+        Map<String, ?> parameters = intakeBindingParameters(request);
+        List<IntakeBindingRow> rows = jdbc.query(
+                LOCK_INTAKE_BINDING_SQL,
+                parameters,
+                (rs, ignored) -> new IntakeBindingRow(
+                        rs.getString("registration_id"),
+                        rs.getString("registration_status"),
+                        rs.getObject("registered_at")));
+        if (rows.size() != 1) {
+            throw new IllegalStateException(
+                    "target Intake graph output has no exact pending Java thread binding");
+        }
+        IntakeBindingRow binding = rows.getFirst();
+        if ("REGISTERED".equals(binding.registrationStatus())) {
+            if (binding.registeredAt() == null) {
+                throw new IllegalStateException(
+                        "target Intake registered Java thread binding is missing registered_at");
+            }
+            return;
+        }
+        if (!"PENDING".equals(binding.registrationStatus()) || binding.registeredAt() != null) {
+            throw new IllegalStateException(
+                    "target Intake Java thread binding is not pending for final registration");
+        }
+        Map<String, Object> compareAndSet = new java.util.HashMap<>(parameters);
+        compareAndSet.put("registrationId", binding.registrationId());
+        if (jdbc.update(REGISTER_INTAKE_BINDING_SQL, compareAndSet) != 1) {
+            throw new IllegalStateException(
+                    "target Intake Java thread binding registration compare-and-set failed");
+        }
+    }
+
+    private static Map<String, ?> intakeBindingParameters(ExecuteAgentRunRequest request) {
+        var command = request.command();
+        IntakePrivateThreadRegistration.ActorScope scope =
+                new IntakePrivateThreadRegistration.ActorScope(
+                        command.actorScope().actorId(),
+                        command.actorScope().actorRole(),
+                        command.actorScope().audience(),
+                        command.actorScope().capabilities());
+        return Map.ofEntries(
+                Map.entry("tenantSurrogate", command.tenantSurrogate()),
+                Map.entry("caseId", command.caseId()),
+                Map.entry("roomEpoch", command.roomEpoch()),
+                Map.entry("threadId", command.threadId()),
+                Map.entry("actorId", command.actorScope().actorId()),
+                Map.entry("actorRole", command.actorScope().actorRole().name()),
+                Map.entry("audience", command.actorScope().audience().name()),
+                Map.entry("actorScopeHash", IntakeContractHashes.actorScopeHash(scope)),
+                Map.entry("graphKey", command.graphKey()),
+                Map.entry("graphVersion", command.graphVersion()),
+                Map.entry("checkpointSchemaVersion", command.checkpointSchemaVersion()));
+    }
+
+    private void lockLogicalRun(String agentRunId) {
+        List<String> rows = jdbc.query(
+                LOCK_RUN_SQL, Map.of("agentRunId", agentRunId), (rs, ignored) -> rs.getString("id"));
+        if (rows.size() != 1 || !agentRunId.equals(rows.getFirst())) {
+            throw new IllegalStateException("target AgentRun is absent or ambiguous");
+        }
+    }
+
+    private static boolean immutableUri(String value) {
+        if (value == null || value.isBlank() || value.length() > 1024) {
+            return false;
+        }
+        try {
+            URI uri = URI.create(value);
+            return uri.isAbsolute()
+                    && ALLOWED_URI_SCHEMES.contains(uri.getScheme())
+                    && uri.getRawSchemeSpecificPart() != null
+                    && !uri.getRawSchemeSpecificPart().isBlank();
+        } catch (IllegalArgumentException failure) {
+            return false;
+        }
+    }
+
+    private static String snapshotId(String agentRunId, String resultHash) {
+        String hash = ContractJson.sha256Hex(
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode()
+                        .add(agentRunId)
+                        .add(resultHash));
+        return "tgo_" + hash.substring(0, 60);
+    }
+
+    @FunctionalInterface
+    public interface TransactionalFinalization<T> {
+        T finalizeResult();
+    }
+
+    private record SnapshotRow(
+            String id,
+            String roomType,
+            String snapshotType,
+            String sourceType,
+            String sourceId,
+            String schemaVersion,
+            String objectUri,
+            String objectVersion,
+            String contentSha256,
+            long sizeBytes,
+            String contentType,
+            String visibility,
+            String createdBy) {
+
+        private boolean matches(Map<String, ?> expected) {
+            return Objects.equals(id, expected.get("id"))
+                    && Objects.equals(roomType, expected.get("roomType"))
+                    && "AGENT_OUTPUT".equals(snapshotType)
+                    && "AGENT_RUN".equals(sourceType)
+                    && Objects.equals(sourceId, expected.get("agentRunId"))
+                    && Objects.equals(schemaVersion, expected.get("schemaVersion"))
+                    && Objects.equals(objectUri, expected.get("resultRef"))
+                    && objectVersion == null
+                    && Objects.equals(contentSha256, expected.get("resultHash"))
+                    && sizeBytes == 0
+                    && "application/json".equals(contentType)
+                    && "INTERNAL".equals(visibility)
+                    && CREATED_BY.equals(createdBy);
+        }
+    }
+
+    private record IntakeBindingRow(
+            String registrationId, String registrationStatus, Object registeredAt) {}
+}

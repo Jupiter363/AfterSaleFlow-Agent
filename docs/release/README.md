@@ -3,8 +3,9 @@
 本文档是当前生产分支的发布质量门禁，配合[贡献指南](../development/contributing.md)、
 [部署说明](../deployment/README.md)和[生产验证清单](../acceptance/temporal-first-agent-platform-verification-checklist.md)使用。
 
-当前代码和浏览器验证身份见[当前 UAT 基线](current-uat-baseline.md)。UAT 通过是候选证据，
-不是跳过本页 release gate、自动打开生产路由或升级核心组件的授权。
+当前业务浏览器证据见[当前 UAT 基线](current-uat-baseline.md)，首次生产 clean break 与目录
+映射见[Production Runtime 生产重构](production-runtime-refactor-2026-09-04.md)。UAT 通过不是
+跳过本页 release gate、复用旧持久状态、自动打开生产路由或升级核心组件的授权。
 
 ## Code Review Checklist
 

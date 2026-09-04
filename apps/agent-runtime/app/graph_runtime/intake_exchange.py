@@ -60,7 +60,7 @@ class IntakeExchangeAuthority(_ExchangeModel):
     logical_run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    graph_key: Literal["intake.v2", "all-rooms.target-e2e.v2"]
+    graph_key: Literal["intake.v2", "all-rooms.production-runtime.v2"]
     graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     checkpoint_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     process_revision: int = Field(ge=0)
@@ -569,7 +569,7 @@ def _require_proposal_execution_binding(
     record = execution.thread_record
     invocation = command.invocation_context
     registry = execution.admission.registry.binding
-    target_candidate = execution.fence.execution_lane.value == "TARGET_E2E_CANDIDATE"
+    target_candidate = execution.fence.execution_lane.value == "PRODUCTION"
     expected = {
         "command_id": command.command_id,
         "logical_run_id": command.logical_run_id,

@@ -3,14 +3,14 @@ package com.example.dispute.database;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ActivationLifecycle;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ActivationRegistration;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.BuildBindings;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.DatabaseBinding;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ExplicitCaseScope;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.GraphBinding;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ImageDigests;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ActivationLifecycle;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ActivationRegistration;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.BuildBindings;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.DatabaseBinding;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ExplicitCaseScope;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.GraphBinding;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ImageDigests;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -224,8 +224,8 @@ class TemporalControlPlaneMigrationIntegrationTest {
         DriverManagerDataSource dataSource =
                 new DriverManagerDataSource(
                         jdbcUrl() + "?currentSchema=" + schema, USERNAME, PASSWORD);
-        TargetE2EActivationLedger ledger =
-                new TargetE2EActivationLedger(dataSource, Clock.systemUTC());
+        ProductionActivationLedger ledger =
+                new ProductionActivationLedger(dataSource, Clock.systemUTC());
         ledger.registerOrAttach(drainSuccessorActivation());
         ledger.transition(
                 "p9act.v1.66666666666666666666666666666666",
@@ -236,7 +236,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
             execute(
                     connection,
                     """
-                    update target_e2e_activation
+                    update production_runtime_activation
                        set lifecycle_status = 'DRAIN_ONLY',
                            lifecycle_changed_at = expires_at,
                            drain_only_at = expires_at
@@ -247,7 +247,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
         assertSuccessorBindingRejected(
                 schema,
                 SuccessorProbe.legitimate("V047_OLD_RED"),
-                "target E2E room binding requires a live ACTIVE activation");
+                "production runtime room binding requires a live ACTIVE activation");
 
         Flyway.configure()
                 .dataSource(jdbcUrl(), USERNAME, PASSWORD)
@@ -269,7 +269,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                         SuccessorProbe.legitimate("WRONG_BUILD")
                                 .withCaseBuild("p9-wrong-build"),
                         SuccessorProbe.legitimate("WRONG_GRAPH")
-                                .withGraphVersion("target-e2e-graph.wrong"),
+                                .withGraphVersion("production-runtime-graph.wrong"),
                         SuccessorProbe.legitimate("WRONG_ROOM")
                                 .withRoomWorkflowType("EvidenceRoomWorkflow"),
                         SuccessorProbe.legitimate("NON_SUCCESSOR").withFencingToken(8),
@@ -293,8 +293,8 @@ class TemporalControlPlaneMigrationIntegrationTest {
                                     connection,
                                     """
                                     select count(*)
-                                      from target_e2e_room_epoch_binding successor
-                                      join target_e2e_room_epoch_binding source
+                                      from production_runtime_room_epoch_binding successor
+                                      join production_runtime_room_epoch_binding source
                                         on source.activation_id = successor.activation_id
                                        and source.activation_manifest_hash =
                                             successor.activation_manifest_hash
@@ -329,9 +329,9 @@ class TemporalControlPlaneMigrationIntegrationTest {
                 List.of("EVIDENCE", "HEARING"),
                 new BuildBindings("p9-case-build", "p9-control-build", "p9-agent-build"),
                 new GraphBinding(
-                        "all-rooms.target-e2e.v1",
-                        "target-e2e-graph.2026-07-27.1",
-                        "target-e2e-checkpoint.v1",
+                        "all-rooms.production-runtime.v1",
+                        "production-runtime-graph.2026-07-27.1",
+                        "production-runtime-checkpoint.v1",
                         "e".repeat(64),
                         "p9-graph-code-build"),
                 new ImageDigests(
@@ -340,7 +340,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                         "sha256:" + "3".repeat(64),
                         "sha256:" + "4".repeat(64),
                         "sha256:" + "5".repeat(64)),
-                "target-e2e-test",
+                "production-runtime-test",
                 new DatabaseBinding(
                         "domain-cluster-v066",
                         "domain-database-v066",
@@ -404,9 +404,9 @@ class TemporalControlPlaneMigrationIntegrationTest {
                     'case-run-v066',
                     'room-workflow:CASE_DRAIN_SUCCESSOR:EVIDENCE:1',
                     'room-run-v066',
-                    'p9-case-build', 'all-rooms.target-e2e.v1',
-                    'target-e2e-graph.2026-07-27.1',
-                    'target-e2e-checkpoint.v1', 'agent-stream.v2',
+                    'p9-case-build', 'all-rooms.production-runtime.v1',
+                    'production-runtime-graph.2026-07-27.1',
+                    'production-runtime-checkpoint.v1', 'agent-stream.v2',
                     'room-epoch-selection.v2', 'case-process-contract.v1',
                     'CaseProcessWorkflow', 'EvidenceRoomWorkflow', 'p9-control-build',
                     now(), now(), now(), now()
@@ -432,14 +432,14 @@ class TemporalControlPlaneMigrationIntegrationTest {
         execute(
                 connection,
                 """
-                insert into target_e2e_room_epoch_binding (
+                insert into production_runtime_room_epoch_binding (
                     epoch_id, activation_id, activation_manifest_hash, execution_lane,
                     isolated_domain_db_binding_hash, tenant_surrogate, case_id,
                     room_type, room_epoch, room_fencing_token
                 ) values (
                     'EPOCH_DRAIN_SOURCE',
                     'p9act.v1.66666666666666666666666666666666',
-                    repeat('a', 64), 'TARGET_E2E_CANDIDATE', repeat('b', 64),
+                    repeat('a', 64), 'PRODUCTION', repeat('b', 64),
                     'tenant-drain-successor', 'CASE_DRAIN_SUCCESSOR',
                     'EVIDENCE', 1, 6
                 )
@@ -533,7 +533,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
             execute(
                     connection,
                     """
-                    update target_e2e_activation
+                    update production_runtime_activation
                        set lifecycle_status = 'DRAINED',
                            lifecycle_changed_at = expires_at + interval '1 second',
                            drained_at = expires_at + interval '1 second',
@@ -549,7 +549,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
             execute(
                     connection,
                     """
-                    update target_e2e_activation
+                    update production_runtime_activation
                        set lifecycle_status = 'REVOKED_TERMINAL',
                            lifecycle_changed_at = expires_at + interval '2 seconds',
                            revoked_at = expires_at + interval '2 seconds'
@@ -563,13 +563,13 @@ class TemporalControlPlaneMigrationIntegrationTest {
         execute(
                 connection,
                 """
-                insert into target_e2e_room_epoch_binding (
+                insert into production_runtime_room_epoch_binding (
                     epoch_id, activation_id, activation_manifest_hash, execution_lane,
                     isolated_domain_db_binding_hash, tenant_surrogate, case_id,
                     room_type, room_epoch, room_fencing_token
                 ) values (
                     '%s', 'p9act.v1.66666666666666666666666666666666',
-                    '%s', 'TARGET_E2E_CANDIDATE', repeat('b', 64),
+                    '%s', 'PRODUCTION', repeat('b', 64),
                     '%s', '%s', 'HEARING', 0, %d
                 )
                 """
@@ -602,7 +602,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                     "tenant-drain-successor",
                     "CASE_DRAIN_SUCCESSOR",
                     "p9-case-build",
-                    "target-e2e-graph.2026-07-27.1",
+                    "production-runtime-graph.2026-07-27.1",
                     "HearingRoomWorkflow",
                     "DRAIN_ONLY");
         }

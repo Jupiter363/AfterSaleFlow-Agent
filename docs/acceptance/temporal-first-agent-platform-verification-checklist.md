@@ -389,8 +389,8 @@ test-reports/temporal-first/{release-id}/
 旧的 Phase 0-8 条目是已经完成的实施计划，不再作为待办清单。每个候选提交必须以同一
 release identity 完成以下门禁；不得拼接不同提交、不同 activation 或不同模型配置的结果。
 
-- [ ] `RELBASE-001` **P0** Graph 固定为 `all-rooms.target-e2e.v2` /
-  `target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`。
+- [ ] `RELBASE-001` **P0** Graph 固定为 `all-rooms.production-runtime.v2` /
+  `production-runtime-graph.2026-08-18.3` / `production-runtime-checkpoint.v2`。
 - [ ] `RELBASE-002` **P0** 新 Intake epoch 固定 `PARALLEL_FRAMES_V1` 和
   `agent-stream.v4`；历史 `MONOLITHIC_V3` 只走已记录的兼容/回放路径。
 - [ ] `RELBASE-003` **P0** 三个 Intake sibling Node、独立 checkpoint、exact-three
@@ -407,7 +407,7 @@ release identity 完成以下门禁；不得拼接不同提交、不同 activati
   丢失命令、未授权工具执行或靠人工数据库修改解锁流程。
 - [ ] `RELBASE-009` **P0** 当前 activation、worker、Graph、Prompt、Model、Schema 和
   artifact hash 完全匹配；任一版本漂移失败关闭。
-- [ ] `RELBASE-010` **P0** Target E2E/Temporal 候选开关保持显式授权；UAT 成功不自动
+- [ ] `RELBASE-010` **P0** Production Runtime/Temporal 候选开关保持显式授权；UAT 成功不自动
   修改默认生产路由、Current/Ramping version 或核心组件版本。
 - [ ] `RELBASE-011` **P0** Temporal/数据库等核心组件升级具有单独批准、逐版本迁移、
   一致备份恢复和 rollback 证据；应用发布命令不得隐式升级它们。

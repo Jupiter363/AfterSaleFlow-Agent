@@ -152,7 +152,7 @@ begin
            and event.event_type = 'TARGET_REVIEW_DECISION_COMMITTED'
            and event.event_key = 'target-review-decision:' || approval.id
            and event.event_json ->> 'schema_version' =
-               'target-e2e-review-human-decision-event.v1'
+               'production-runtime-review-human-decision-event.v1'
            and event.event_json ->> 'case_id' = task.case_id
            and event.event_json ->> 'review_task_id' = task.id
            and event.event_json ->> 'approval_record_id' = approval.id
@@ -181,15 +181,15 @@ begin
            and command.expected_process_revision::text =
                event.event_json ->> 'case_process_revision'
            and command.payload_schema_version =
-               'target-e2e-review-human-decision-event.v1'
-           and command.payload_uri = 'urn:target-e2e:review-decision:' || event.id
+               'production-runtime-review-human-decision-event.v1'
+           and command.payload_uri = 'urn:production-runtime:review-decision:' || event.id
            and command.payload_sha256 ~ '^[0-9a-f]{64}$'
           join notification_outbox handoff
             on handoff.case_id = task.case_id
            and handoff.event_type = 'TARGET_REVIEW_OUTCOME_HANDOFF'
            and handoff.business_event_key like 'target-review-handoff:%'
            and handoff.event_payload_json ->> 'schema_version' =
-               'target-e2e-review-outcome-handoff.v1'
+               'production-runtime-review-outcome-handoff.v1'
            and handoff.event_payload_json ->> 'handoff_id' = handoff.id
            and handoff.event_payload_json ->> 'activation_id' ~
                '^p9act[.]v1[.][0-9a-f]{32}$'
@@ -202,7 +202,7 @@ begin
            and handoff.event_payload_json ->> 'room_fencing_token' =
                event.event_json ->> 'fencing_token'
            and handoff.event_payload_json #>> '{human_decision,schema_version}' =
-               'target-e2e-review-human-decision-receipt.v1'
+               'production-runtime-review-human-decision-receipt.v1'
            and handoff.event_payload_json #>> '{human_decision,decision_authority}' =
                'JAVA_HUMAN'
            and handoff.event_payload_json #>> '{human_decision,decision_record_id}' = approval.id
@@ -342,7 +342,7 @@ alter table hearing_review_handoff_fact
 -- The Review epoch is authorized by the exact task created by the Hearing handoff. This table is
 -- intentionally not backfilled from "the latest open task": legacy epochs without a durable
 -- handoff binding remain unavailable to target SQL.
-create table target_e2e_review_epoch_task_binding (
+create table production_runtime_review_epoch_task_binding (
     epoch_id varchar(64) primary key,
     tenant_surrogate varchar(128) not null,
     case_id varchar(64) not null,
@@ -383,9 +383,9 @@ end;
 $$;
 
 create trigger trg_review_epoch_task_binding_reject_row_mutation
-    before update or delete on target_e2e_review_epoch_task_binding
+    before update or delete on production_runtime_review_epoch_task_binding
     for each row execute function reject_review_epoch_task_binding_mutation();
 
 create trigger trg_review_epoch_task_binding_reject_truncate
-    before truncate on target_e2e_review_epoch_task_binding
+    before truncate on production_runtime_review_epoch_task_binding
     for each statement execute function reject_review_epoch_task_binding_mutation();

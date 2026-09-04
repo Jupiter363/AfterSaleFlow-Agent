@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/production-runtime/v1/production-runtime-graph-result-envelope.schema.json",
+  "title": "Production Runtime Graph Proposal Result Envelope v1",
+  "description": "Binds a proposal-only room-graph-result.v1 to the activation lane without granting formal write authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-canonicalization": "RFC_8785",
+  "x-result-hash": {
+    "field": "result_hash",
+    "rule": "EQUALS_NESTED_RESULT_OUTPUT_HASH",
+    "nestedOutputHashPreimage": "RFC8785_FULL_ROOM_GRAPH_RESULT_V1_OMITTING_ONLY_OUTPUT_HASH",
+    "validationOrder": ["VALIDATE_ROOM_GRAPH_RESULT_V1", "VERIFY_NESTED_OUTPUT_HASH", "REQUIRE_RESULT_HASH_EQUALS_OUTPUT_HASH"]
+  },
+  "x-proposal-hash": {"field": "proposal_hash", "preimage": "RFC8785_EXACT_ROOM_SPECIFIC_PROPOSAL_PAYLOAD_VALIDATED_BY_ITS_SCHEMA"},
+  "x-self-hash": {"algorithm": "SHA-256", "field": "result_envelope_hash", "preimage": "RFC8785_OMIT_TOP_LEVEL_FIELD", "omitFields": ["result_envelope_hash"]},
+  "required": ["schema_version", "execution_lane", "activation_id", "room_fencing_token", "command_hash", "command_envelope_hash", "execution_provider", "execution_model", "result_hash", "proposal_hash", "result_envelope_hash", "graph_output_authority", "result"],
+  "properties": {
+    "schema_version": {"const": "production-runtime-graph-result-envelope.v1"},
+    "execution_lane": {"const": "PRODUCTION"},
+    "activation_id": {"type": "string", "pattern": "^p9act\\.v1\\.[0-9a-f]{32}$"},
+    "room_fencing_token": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "command_hash": {"$ref": "#/$defs/sha256"},
+    "command_envelope_hash": {"$ref": "#/$defs/sha256"},
+    "execution_provider": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": ".*\\S.*"},
+    "execution_model": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": ".*\\S.*"},
+    "result_hash": {"$ref": "#/$defs/sha256"},
+    "proposal_hash": {"$ref": "#/$defs/sha256"},
+    "result_envelope_hash": {"$ref": "#/$defs/sha256"},
+    "graph_output_authority": {"const": "PROPOSAL_ONLY"},
+    "result": {"$ref": "../../v1/room-graph-result.schema.json"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -376,7 +376,7 @@ public class PostgresAgentRunV2EventStore {
         }
         if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
             throw new IllegalStateException(
-                    "target-only stream writes require a separately authorized release switch");
+                    "production-only stream writes require a separately authorized release switch");
         }
         List<PersistedEvent> batch = prepareBatch(List.of(required));
         AgentRunAttemptStatus attemptStatus = lockAttempt(required.runId(), required.attemptId());
@@ -402,7 +402,7 @@ public class PostgresAgentRunV2EventStore {
         requireSanitizedFinalizationError(required);
         if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
             throw new IllegalStateException(
-                    "target-only stream writes require a separately authorized release switch");
+                    "production-only stream writes require a separately authorized release switch");
         }
         AgentRunAttemptStatus attemptStatus = lockAttempt(required.runId(), required.attemptId());
         if (attemptStatus != AgentRunAttemptStatus.FAILED
@@ -506,7 +506,7 @@ public class PostgresAgentRunV2EventStore {
 
     /**
      * Derives target-aware rollback coverage from authoritative rows. Unlike pre-switch parity,
-     * this deliberately permits target-only suffixes while requiring exact conflict-free overlap.
+     * this deliberately permits production-only suffixes while requiring exact conflict-free overlap.
      */
     public StreamCompatibilityMode.RollbackCoverage validateRollbackCoverage(
             String streamProtocol, String runId, String attemptId) {
@@ -626,7 +626,7 @@ public class PostgresAgentRunV2EventStore {
     private BatchAppendReceipt appendInTransaction(List<PersistedEvent> batch) {
         if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
             throw new IllegalStateException(
-                    "target-only stream writes require a separately authorized release switch");
+                    "production-only stream writes require a separately authorized release switch");
         }
         AgentStreamEvent first = batch.getFirst().event();
         AgentRunAttemptStatus attemptStatus = lockAttempt(first.runId(), first.attemptId());

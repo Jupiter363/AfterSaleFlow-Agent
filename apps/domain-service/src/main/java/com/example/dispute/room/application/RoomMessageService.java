@@ -31,11 +31,11 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePartic
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
-import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
-import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
-import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetEvidenceOpeningIngress;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.IntakeIngressSelection;
+import com.example.dispute.workflow.runtime.ingress.IntakeMessageIngressRouter;
+import com.example.dispute.workflow.runtime.ingress.TargetIntakeMessageRequest;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetEvidenceOpeningIngress;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;

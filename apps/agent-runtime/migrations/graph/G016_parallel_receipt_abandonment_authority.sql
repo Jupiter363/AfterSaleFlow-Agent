@@ -639,7 +639,7 @@ declare
         '        ) select deleted_rows + count(*) into deleted_rows from deleted;' || chr(10) ||
         '        if deleted_rows = 0 then' || chr(10) ||
         '            raise exception using errcode = ''23514'',' || chr(10) ||
-        '                message = ''target-E2E Graph purge receipt lineage is not acyclic'';' || chr(10) ||
+        '                message = ''production-runtime Graph purge receipt lineage is not acyclic'';' || chr(10) ||
         '        end if;' || chr(10) ||
         '    end loop;' || chr(10) || chr(10) ||
         lineage_end_anchor;
@@ -647,7 +647,7 @@ declare
     end_position integer;
 begin
     select pg_get_functiondef(
-        'purge_target_e2e_test_graph_thread(varchar,varchar,varchar,bigint,varchar,varchar,varchar,varchar,jsonb)'::regprocedure
+        'purge_production_runtime_test_graph_thread(varchar,varchar,varchar,bigint,varchar,varchar,varchar,varchar,jsonb)'::regprocedure
     ) into purge_definition;
 
     if position(count_anchor in purge_definition) = 0

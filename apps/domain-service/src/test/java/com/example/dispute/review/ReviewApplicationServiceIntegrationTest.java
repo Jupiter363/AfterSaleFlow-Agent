@@ -59,12 +59,12 @@ import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingFormalizationActivities;
-import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalCompletion;
-import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingInternalStageMaterializer;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.rooms.hearing.JdbcTargetHearingFormalizationActivities;
+import com.example.dispute.workflow.runtime.rooms.hearing.TargetHearingFormalCompletion;
+import com.example.dispute.workflow.runtime.rooms.hearing.TargetHearingInternalStageMaterializer;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -1344,7 +1344,7 @@ class ReviewApplicationServiceIntegrationTest {
         long processRevision = 3;
 
         var event = mapper.createObjectNode();
-        event.put("schema_version", "target-e2e-review-human-decision-event.v1");
+        event.put("schema_version", "production-runtime-review-human-decision-event.v1");
         event.put("approval_record_id", approval.getId());
         event.put("approval_hash", approval.getApprovalHash());
         event.set("approved_plan", mapper.readTree(approval.getApprovedPlanJson()));
@@ -1422,14 +1422,14 @@ class ReviewApplicationServiceIntegrationTest {
         outcome.put("committed_at", approval.getCreatedAt().toInstant().toString());
         outcome.put("synthetic_only", false);
         var humanDecision = mapper.createObjectNode();
-        humanDecision.put("schema_version", "target-e2e-review-human-decision-receipt.v1");
+        humanDecision.put("schema_version", "production-runtime-review-human-decision-receipt.v1");
         humanDecision.put("decision_authority", "JAVA_HUMAN");
         humanDecision.put("decision_record_id", approval.getId());
         humanDecision.put("decision_record_hash", eventHash);
         humanDecision.set("outcome_receipt", outcome);
         String handoffId = "HANDOFF_TERMINAL_TARGET_REPLAY";
         var handoff = mapper.createObjectNode();
-        handoff.put("schema_version", "target-e2e-review-outcome-handoff.v1");
+        handoff.put("schema_version", "production-runtime-review-outcome-handoff.v1");
         handoff.put("handoff_id", handoffId);
         handoff.put("activation_id", "p9act.v1." + "1".repeat(32));
         handoff.put("activation_manifest_hash", "2".repeat(64));
@@ -1470,7 +1470,7 @@ class ReviewApplicationServiceIntegrationTest {
                                from case_command existing where existing.case_id = :caseId),
                             'REVIEW_DECISION', 'REVIEW', :roomEpoch, :reviewer,
                             'PLATFORM_REVIEWER', '["review:decide"]'::jsonb,
-                            'target-e2e-review-human-decision-event.v1', :payloadUri,
+                            'production-runtime-review-human-decision-event.v1', :payloadUri,
                             :payloadHash, :payloadSize, :processRevision, current_timestamp,
                             current_timestamp + interval '1 hour', :traceparent,
                             :requestHash, 'PENDING_ORCHESTRATION'
@@ -1480,7 +1480,7 @@ class ReviewApplicationServiceIntegrationTest {
                 .setParameter("caseId", task.getCaseId())
                 .setParameter("roomEpoch", roomEpoch)
                 .setParameter("reviewer", approval.getReviewerId())
-                .setParameter("payloadUri", "urn:target-e2e:review-decision:" + eventId)
+                .setParameter("payloadUri", "urn:production-runtime:review-decision:" + eventId)
                 .setParameter("payloadHash", eventHash)
                 .setParameter("payloadSize", eventJson.getBytes(StandardCharsets.UTF_8).length)
                 .setParameter("processRevision", processRevision)

@@ -47,7 +47,7 @@ HEARING_EVIDENCE_SYNTHESIS_PROVIDER_ATTEMPT_LIMIT: Final[int] = 202
 PARALLEL_INTAKE_AGENT_PROFILE_ID: Final[str] = (
     "dispute-intake-officer.parallel-frames.v1"
 )
-PARALLEL_INTAKE_OUTPUT_SCHEMA: Final[str] = "target-e2e-room-proposal-source.v2"
+PARALLEL_INTAKE_OUTPUT_SCHEMA: Final[str] = "production-runtime-room-proposal-source.v2"
 
 
 def command_provider_attempt_limit(

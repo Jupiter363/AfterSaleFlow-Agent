@@ -625,7 +625,7 @@ describe("agentStreamStore", () => {
       `id: v3:${attemptId}:1\nevent: public_frame_start\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":1,"cursor":"v3:${attemptId}:1","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"frameType":"ROOM_WELCOME","publicHeader":{"frame_sequence":1,"frame_type":"ROOM_WELCOME"}}}\n\n`,
       `id: v3:${attemptId}:2\nevent: active_frame_snapshot\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":2,"cursor":"v3:${attemptId}:2","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"deltaIndex":2,"publicText":"欢迎进入"}}\n\n`,
       `id: v3:${attemptId}:3\nevent: public_frame_committed\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":3,"cursor":"v3:${attemptId}:3","audience":"USER","payload":{"frameId":"${frameId}","frameSequence":1,"durableCursor":"v3:${attemptId}:FRAME:1","headerSha256":"${"a".repeat(64)}","publicTextSha256":"${"b".repeat(64)}","frameSha256":"${"c".repeat(64)}","publicTextChars":4}}\n\n`,
-      `id: v3:${attemptId}:4\nevent: final\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":4,"cursor":"v3:${attemptId}:4","audience":"USER","payload":{"finalResultRef":"urn:target-e2e:result:${runId}","finalResultHash":"${"d".repeat(64)}"}}\n\n`,
+      `id: v3:${attemptId}:4\nevent: final\ndata: {"protocol":"agent-stream.v3","runId":"${runId}","attemptId":"${attemptId}","sequence":4,"cursor":"v3:${attemptId}:4","audience":"USER","payload":{"finalResultRef":"urn:production-runtime:result:${runId}","finalResultHash":"${"d".repeat(64)}"}}\n\n`,
     ];
     const visiblePrefixes = [];
 

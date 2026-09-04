@@ -28,11 +28,11 @@ public record IntakeRoomStart(
     IntakeRoomCarryState carryState) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
-  private static final String TARGET_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2";
-  private static final String TARGET_MODEL_PROFILE_ID = "target-e2e.contract-blocked";
-  private static final String TARGET_OUTPUT_SCHEMA_VERSION = "target-e2e-intake-output.v1";
-  private static final String TARGET_POLICY_VERSION = "all-rooms-policy.target-e2e.v1";
-  private static final String TARGET_GUARDRAIL_VERSION = "all-rooms-guardrail.target-e2e.v1";
+  private static final String TARGET_PROMPT_VERSION = "all-rooms-prompt.production-runtime.v2";
+  private static final String TARGET_MODEL_PROFILE_ID = "production-runtime.contract-blocked";
+  private static final String TARGET_OUTPUT_SCHEMA_VERSION = "production-runtime-intake-output.v1";
+  private static final String TARGET_POLICY_VERSION = "all-rooms-policy.production-runtime.v1";
+  private static final String TARGET_GUARDRAIL_VERSION = "all-rooms-guardrail.production-runtime.v1";
   private static final String TARGET_TOOL_POLICY_VERSION = "tools.none.v1";
 
   public IntakeRoomStart(
@@ -136,8 +136,8 @@ public record IntakeRoomStart(
         nextCarryState);
   }
 
-  /** True only for the target artifact's fully pinned Intake execution profile. */
-  public boolean targetE2eCandidate() {
+  /** True only for the production runtime artifact's fully pinned Intake execution profile. */
+  public boolean productionCandidate() {
     return TARGET_PROMPT_VERSION.equals(promptVersion)
         && TARGET_MODEL_PROFILE_ID.equals(modelProfileId)
         && TARGET_OUTPUT_SCHEMA_VERSION.equals(outputSchemaVersion)

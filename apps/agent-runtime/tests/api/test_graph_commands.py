@@ -62,10 +62,10 @@ from app.graphs.intake.errors import IntakeGraphContractError
 from app.harness.prompt_composer import PromptResourceError
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
 from app.graph_runtime.ledger import ParallelReceiptAbandonmentRecord
-from app.graph_runtime.target_e2e import (
-    TargetE2EGraphCommandEnvelope,
-    VerifiedTargetE2EInvocation,
-    target_e2e_command_hash,
+from app.graph_runtime.production_runtime import (
+    ProductionGraphCommandEnvelope,
+    VerifiedProductionInvocation,
+    production_runtime_command_hash,
 )
 from app.model_runtime.transports import ModelTransportOutputError
 from app.model_runtime.governed_chat_model import ModelStreamInterrupted
@@ -141,7 +141,7 @@ class FakeStreamService:
 class FakeParallelStreamService:
     def __init__(self, command: RoomGraphCommand) -> None:
         self.prepare_calls: list[
-            tuple[RoomGraphCommand, VerifiedTargetE2EInvocation, ThreadIdentity]
+            tuple[RoomGraphCommand, VerifiedProductionInvocation, ThreadIdentity]
         ] = []
         self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
         self.abandonment_calls: list[str] = []
@@ -171,7 +171,7 @@ class FakeParallelStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ParallelFrameStreamAuthority:
         self.prepare_calls.append((command, verified_invocation, expected_thread))
@@ -181,7 +181,7 @@ class FakeParallelStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream:
@@ -223,7 +223,7 @@ class FakeParallelStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
         failure_code: str,
@@ -250,7 +250,7 @@ class FakeParallelStreamService:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> ParallelReceiptAbandonmentRecord:
@@ -326,17 +326,17 @@ class ThreadResolver:
 class TargetVerifier:
     def __init__(
         self,
-        envelope: TargetE2EGraphCommandEnvelope,
-        verified: VerifiedTargetE2EInvocation,
+        envelope: ProductionGraphCommandEnvelope,
+        verified: VerifiedProductionInvocation,
     ) -> None:
         self.envelope = envelope
         self.verified = verified
 
-    def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+    def verify_envelope(self, **kwargs: Any) -> VerifiedProductionInvocation:
         assert kwargs["envelope"] == self.envelope
         return self.verified
 
-    def verify_parallel_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+    def verify_parallel_envelope(self, **kwargs: Any) -> VerifiedProductionInvocation:
         assert kwargs["envelope"] == self.envelope
         if kwargs["phase"] == "PREPARE":
             assert kwargs["admission_receipt_sha256"] is None
@@ -755,12 +755,12 @@ def _client(
 
 def _target_client(
     *,
-    envelope: TargetE2EGraphCommandEnvelope,
+    envelope: ProductionGraphCommandEnvelope,
     service: FakeStreamService,
     parallel_service: FakeParallelStreamService | None = None,
 ) -> TestClient:
     command = envelope.command
-    verified = VerifiedTargetE2EInvocation(
+    verified = VerifiedProductionInvocation(
         claims=object(),  # type: ignore[arg-type]
         key_id=KID,
         request_hash=command.request_hash,
@@ -774,14 +774,14 @@ def _target_client(
     app.include_router(
         create_graph_commands_router(
             GraphCommandEndpointDependencies(
-                mode="TARGET_E2E_CANDIDATE",
+                mode="PRODUCTION",
                 codec=ContractCodec(CONTRACT_ROOT),
                 transport_identity_resolver=IdentityResolver(),
                 envelope_verifier=object(),  # type: ignore[arg-type]
                 thread_identity_resolver=ThreadResolver(),
                 stream_service=service,
                 ready=lambda: True,
-                target_e2e_envelope_verifier=TargetVerifier(envelope, verified),
+                production_runtime_envelope_verifier=TargetVerifier(envelope, verified),
                 parallel_intake_stream_service=parallel_service,
             )
         )
@@ -789,16 +789,16 @@ def _target_client(
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _target_envelope(command: RoomGraphCommand) -> TargetE2EGraphCommandEnvelope:
+def _target_envelope(command: RoomGraphCommand) -> ProductionGraphCommandEnvelope:
     values = {
-        "schema_version": "target-e2e-graph-command-envelope.v1",
-        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "schema_version": "production-runtime-graph-command-envelope.v1",
+        "execution_lane": "PRODUCTION",
         "activation_id": "p9act.v1." + ("a" * 32),
         "room_fencing_token": 7,
-        "command_hash": target_e2e_command_hash(command),
+        "command_hash": production_runtime_command_hash(command),
         "command": command.model_dump(mode="json", exclude_none=True),
     }
-    return TargetE2EGraphCommandEnvelope.model_validate(
+    return ProductionGraphCommandEnvelope.model_validate(
         {**values, "command_envelope_hash": canonical_sha256(values)}
     )
 
@@ -874,7 +874,7 @@ def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> 
     )
 
     prepared = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -890,7 +890,7 @@ def test_target_exact_parallel_command_uses_only_parallel_technical_stream() -> 
     assert parallel.calls == []
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -931,7 +931,7 @@ def test_target_exact_parallel_terminate_returns_bound_failure_receipt() -> None
     admission_header = _parallel_admission_header(command, parallel.authority)
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -965,7 +965,7 @@ def test_target_exact_parallel_abandon_returns_bound_immutable_receipt() -> None
     )
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -996,7 +996,7 @@ def test_target_exact_parallel_command_fails_closed_without_parallel_runtime() -
     envelope = _target_envelope(command)
     legacy = FakeStreamService(())
     response = _target_client(envelope=envelope, service=legacy).post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1059,12 +1059,12 @@ def test_graph_command_endpoint_rejects_bootstrap_activation_header() -> None:
         headers={
             "Authorization": f"Bearer {_token(command, private_key)}",
             "Content-Type": "application/json; charset=utf-8",
-            "X-AfterSaleFlow-Target-E2E-Activation": "forbidden",
+            "X-AfterSaleFlow-Production-Runtime-Activation": "forbidden",
         },
     )
 
     assert response.status_code == 400
-    assert response.json()["code"] == "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN"
+    assert response.json()["code"] == "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN"
     assert service.calls == []
 
 
@@ -1331,7 +1331,7 @@ def test_target_stream_exposes_only_registered_intake_contract_error_codes(
         failure_before=IntakeGraphContractError(stable_code),
     )
     before = _target_client(envelope=envelope, service=before_service).post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1347,7 +1347,7 @@ def test_target_stream_exposes_only_registered_intake_contract_error_codes(
         failure_after=IntakeGraphContractError(stable_code),
     )
     after = _target_client(envelope=envelope, service=after_service).post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1372,7 +1372,7 @@ def test_target_stream_exposes_only_registered_intake_contract_error_codes(
         failure_after=private_error,
     )
     private = _target_client(envelope=envelope, service=private_service).post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1445,7 +1445,7 @@ def test_transient_persistence_failure_before_first_event_returns_retryable_503(
     assert service.closed is True
 
 
-def test_target_e2e_lock_contention_before_first_event_returns_retryable_503() -> None:
+def test_production_runtime_lock_contention_before_first_event_returns_retryable_503() -> None:
     command, _ = _command()
     envelope = _target_envelope(command)
     service = FakeStreamService(
@@ -1455,7 +1455,7 @@ def test_target_e2e_lock_contention_before_first_event_returns_retryable_503() -
     client = _target_client(envelope=envelope, service=service)
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1716,7 +1716,7 @@ def test_prompt_resource_failure_keeps_stable_diagnostic_code() -> None:
     assert service.closed is True
 
 
-def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -> None:
+def test_production_runtime_retryable_runtime_failure_requests_a_new_attempt_in_band() -> None:
     command, _ = _command()
     envelope = _target_envelope(command)
     service = FakeStreamService(
@@ -1726,7 +1726,7 @@ def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -
     client = _target_client(envelope=envelope, service=service)
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",
@@ -1735,7 +1735,7 @@ def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -
     )
 
     assert response.status_code == 200
-    assert response.headers["x-graph-execution-lane"] == "TARGET_E2E_CANDIDATE"
+    assert response.headers["x-graph-execution-lane"] == "PRODUCTION"
     events = [json.loads(line) for line in response.text.splitlines()]
     assert [(event["sequence_no"], event["event_type"]) for event in events] == [
         (0, "attempt_started"),
@@ -1745,7 +1745,7 @@ def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -
     assert service.closed is True
 
 
-def test_target_e2e_lock_contention_after_first_event_aborts_the_attempt() -> None:
+def test_production_runtime_lock_contention_after_first_event_aborts_the_attempt() -> None:
     command, _ = _command()
     envelope = _target_envelope(command)
     service = FakeStreamService(
@@ -1755,7 +1755,7 @@ def test_target_e2e_lock_contention_after_first_event_aborts_the_attempt() -> No
     client = _target_client(envelope=envelope, service=service)
 
     response = client.post(
-        "/internal/graphs/target-e2e/commands/stream",
+        "/internal/graphs/production-runtime/commands/stream",
         content=envelope.model_dump_json(),
         headers={
             "Authorization": "Bearer a.b.c",

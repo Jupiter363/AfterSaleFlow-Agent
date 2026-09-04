@@ -238,7 +238,7 @@ public record IntakeAgentRunFinalizationReadResult(
             "schemaVersion must be intake-agent-run-finalization-locator.v1");
       }
       if (!IntakeTargetAgentRunContext.TARGET_LANE.equals(executionLane)) {
-        throw new IllegalArgumentException("executionLane must be TARGET_E2E_CANDIDATE");
+        throw new IllegalArgumentException("executionLane must be PRODUCTION");
       }
       if (activationId == null || !activationId.matches("p9act\\.v1\\.[0-9a-f]{32}")) {
         throw new IllegalArgumentException("activationId is invalid");

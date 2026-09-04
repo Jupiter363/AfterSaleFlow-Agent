@@ -1,7 +1,7 @@
 package com.example.dispute.workflow.temporal.caseprocess;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
 import com.fasterxml.jackson.databind.SerializationFeature;

@@ -15,8 +15,8 @@ from app.api.graph_commands import (
     create_graph_reconciliation_router,
 )
 from app.config import (
-    GraphTargetE2EBindingSettings,
-    GraphTargetE2ERuntimeContextSettings,
+    GraphProductionBindingSettings,
+    GraphProductionRuntimeContextSettings,
 )
 from app.contracts.v1.codec import (
     ContractCodec,
@@ -39,14 +39,14 @@ from app.graph_runtime.errors import (
     GraphTerminalBindingError,
 )
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
-from app.graph_runtime.target_e2e import (
-    TargetE2EGraphCommandEnvelope,
-    TargetE2EGraphResultEnvelope,
-    TargetE2EInvocationClaims,
-    TargetE2ERoomProposalSource,
-    TargetE2ERuntimeAuthority,
-    VerifiedTargetE2EInvocation,
-    target_e2e_command_hash,
+from app.graph_runtime.production_runtime import (
+    ProductionGraphCommandEnvelope,
+    ProductionGraphResultEnvelope,
+    ProductionInvocationClaims,
+    ProductionRoomProposalSource,
+    ProductionRuntimeAuthority,
+    VerifiedProductionInvocation,
+    production_runtime_command_hash,
 )
 from app.security.invocation_envelope import (
     InvocationClaims,
@@ -68,8 +68,8 @@ RESPONSE_FIXTURE = (
     CONTRACT_ROOT / "fixtures/valid/graph-reconcile-response-valid.json"
 )
 PATH = "/internal/graphs/commands/reconcile"
-TARGET_PATH = "/internal/graphs/target-e2e/commands/reconcile"
-TARGET_PROPOSAL_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
+TARGET_PATH = "/internal/graphs/production-runtime/commands/reconcile"
+TARGET_PROPOSAL_PATH = "/internal/graphs/production-runtime/commands/proposal-source"
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
@@ -82,12 +82,12 @@ def _target_command() -> RoomGraphCommand:
     values = command.model_dump(mode="json", exclude_none=True)
     values.update(
         {
-        "graph_key": "all-rooms.target-e2e.v1",
-            "graph_version": "target-e2e-graph.2026-07-27.1",
-            "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+        "graph_key": "all-rooms.production-runtime.v1",
+            "graph_version": "production-runtime-graph.2026-07-27.1",
+            "checkpoint_schema_version": "production-runtime-checkpoint.v1",
             "invocation_context": {
                 **values["invocation_context"],
-                "output_schema_version": "target-e2e-room-proposal-source.v1",
+                "output_schema_version": "production-runtime-room-proposal-source.v1",
             },
         }
     )
@@ -163,29 +163,29 @@ def _verified_invocation(command: RoomGraphCommand) -> VerifiedInvocation:
 
 def _target_proposal_fixture() -> tuple[
     RoomGraphCommand,
-    TargetE2EGraphCommandEnvelope,
-    VerifiedTargetE2EInvocation,
-    TargetE2ERoomProposalSource,
+    ProductionGraphCommandEnvelope,
+    VerifiedProductionInvocation,
+    ProductionRoomProposalSource,
     str,
 ]:
     command = _target_command()
     activation_id = f"p9act.v1.{'a' * 32}"
-    command_hash = target_e2e_command_hash(command)
+    command_hash = production_runtime_command_hash(command)
     envelope_values = {
-        "schema_version": "target-e2e-graph-command-envelope.v1",
-        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "schema_version": "production-runtime-graph-command-envelope.v1",
+        "execution_lane": "PRODUCTION",
         "activation_id": activation_id,
         "room_fencing_token": 19,
         "command_hash": command_hash,
         "command": command.model_dump(mode="json", exclude_none=True),
     }
-    envelope = TargetE2EGraphCommandEnvelope.model_validate(
+    envelope = ProductionGraphCommandEnvelope.model_validate(
         {
             **envelope_values,
             "command_envelope_hash": canonical_sha256(envelope_values),
         }
     )
-    verified = VerifiedTargetE2EInvocation(
+    verified = VerifiedProductionInvocation(
         claims=_verified_invocation(command).claims,
         key_id=command.invocation_context.envelope_key_id,
         request_hash=command.request_hash,
@@ -198,18 +198,18 @@ def _target_proposal_fixture() -> tuple[
         command_envelope_hash=envelope.command_envelope_hash,
         room_fencing_token=19,
     )
-    proposal_source = TargetE2ERoomProposalSource.model_validate(
+    proposal_source = ProductionRoomProposalSource.model_validate(
         {
-            "schema_version": "target-e2e-room-proposal-source.v1",
+            "schema_version": "production-runtime-room-proposal-source.v1",
             "room_type": command.room_type,
             "proposal": {
-                "schema_version": "target-e2e-intake-proposal.v1",
+                "schema_version": "production-runtime-intake-proposal.v1",
                 "proposal_id": "proposal-target-001",
                 "command_id": command.command_id,
                 "logical_run_id": command.logical_run_id,
                 "attempt_id": command.attempt_id,
                 "payload_schema_version": "intake-turn-proposal.v2",
-                "payload_ref": "urn:target-e2e:proposal:intake:001",
+                "payload_ref": "urn:production-runtime:proposal:intake:001",
                 "payload_hash": "7" * 64,
                 "terminal_class": "COMPLETED",
                 "formal_authority": False,
@@ -355,7 +355,7 @@ def _headers() -> dict[str, str]:
 class _TargetProposalVerifier:
     def __init__(
         self,
-        verified: VerifiedTargetE2EInvocation,
+        verified: VerifiedProductionInvocation,
         *,
         failure: InvocationEnvelopeError | None = None,
     ) -> None:
@@ -363,13 +363,13 @@ class _TargetProposalVerifier:
         self.failure = failure
         self.calls: list[dict[str, Any]] = []
 
-    def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+    def verify_envelope(self, **kwargs: Any) -> VerifiedProductionInvocation:
         return self.verify_envelope_for_reconciliation(**kwargs)
 
     def verify_envelope_for_reconciliation(
         self,
         **kwargs: Any,
-    ) -> VerifiedTargetE2EInvocation:
+    ) -> VerifiedProductionInvocation:
         self.calls.append(kwargs)
         if self.failure is not None:
             raise self.failure
@@ -389,7 +389,7 @@ class _TargetProposalThreadResolver:
 class _TargetProposalService:
     def __init__(
         self,
-        proposal_source: TargetE2ERoomProposalSource,
+        proposal_source: ProductionRoomProposalSource,
         *,
         failure: Exception | None = None,
     ) -> None:
@@ -397,10 +397,10 @@ class _TargetProposalService:
         self.failure = failure
         self.calls: list[dict[str, Any]] = []
 
-    async def retrieve_target_e2e_proposal_source(
+    async def retrieve_production_runtime_proposal_source(
         self,
         **kwargs: Any,
-    ) -> TargetE2ERoomProposalSource:
+    ) -> ProductionRoomProposalSource:
         self.calls.append(kwargs)
         if self.failure is not None:
             raise self.failure
@@ -409,14 +409,14 @@ class _TargetProposalService:
 
 def _target_proposal_client(
     *,
-    mode: str = "TARGET_E2E_CANDIDATE",
+    mode: str = "PRODUCTION",
     ready: bool = True,
     verification_failure: InvocationEnvelopeError | None = None,
     service_failure: Exception | None = None,
 ) -> tuple[
     TestClient,
-    TargetE2EGraphCommandEnvelope,
-    TargetE2ERoomProposalSource,
+    ProductionGraphCommandEnvelope,
+    ProductionRoomProposalSource,
     str,
     _TargetProposalVerifier,
     _TargetProposalThreadResolver,
@@ -442,8 +442,8 @@ def _target_proposal_client(
                 thread_identity_resolver=ThreadResolver(),
                 reconciliation_service=cast(Any, service),
                 ready=lambda: ready,
-                target_e2e_envelope_verifier=verifier,
-                target_e2e_thread_identity_resolver=resolver,
+                production_runtime_envelope_verifier=verifier,
+                production_runtime_thread_identity_resolver=resolver,
             )
         )
     )
@@ -527,7 +527,7 @@ def test_target_proposal_source_rejects_missing_malformed_or_oversized_headers(
     )
 
     assert response.status_code == 400
-    assert response.json()["code"] == "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED"
+    assert response.json()["code"] == "PRODUCTION_RUNTIME_PROPOSAL_SOURCE_HEADERS_REJECTED"
     assert verifier.calls == resolver.calls == service.calls == []
     assert "proposal" not in response.text
 
@@ -551,7 +551,7 @@ def test_target_proposal_source_rejects_duplicate_selector_headers() -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["code"] == "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED"
+    assert response.json()["code"] == "PRODUCTION_RUNTIME_PROPOSAL_SOURCE_HEADERS_REJECTED"
     assert verifier.calls == resolver.calls == service.calls == []
 
 
@@ -559,12 +559,12 @@ def test_target_proposal_source_rejects_duplicate_selector_headers() -> None:
     ("failure", "expected_code"),
     [
         (
-            InvocationEnvelopeError("TARGET_E2E_COMMAND_SIGNATURE_REJECTED"),
-            "TARGET_E2E_COMMAND_SIGNATURE_REJECTED",
+            InvocationEnvelopeError("PRODUCTION_RUNTIME_COMMAND_SIGNATURE_REJECTED"),
+            "PRODUCTION_RUNTIME_COMMAND_SIGNATURE_REJECTED",
         ),
         (
-            InvocationEnvelopeError("TARGET_E2E_COMMAND_BINDING_MISMATCH"),
-            "TARGET_E2E_COMMAND_BINDING_MISMATCH",
+            InvocationEnvelopeError("PRODUCTION_RUNTIME_COMMAND_BINDING_MISMATCH"),
+            "PRODUCTION_RUNTIME_COMMAND_BINDING_MISMATCH",
         ),
     ],
 )
@@ -634,7 +634,7 @@ def test_target_proposal_source_rejects_wrong_mode_activation_and_oversized_body
         content=json.dumps(envelope.model_dump(mode="json")),
         headers={
             **_target_proposal_headers(result_ref, proposal_source.proposal_hash),
-            "X-AfterSaleFlow-Target-E2E-Activation": "forbidden",
+            "X-AfterSaleFlow-Production-Runtime-Activation": "forbidden",
         },
     )
     oversized = client.post(
@@ -645,7 +645,7 @@ def test_target_proposal_source_rejects_wrong_mode_activation_and_oversized_body
 
     assert wrong_mode.status_code == 503
     assert activation.status_code == 400
-    assert activation.json()["code"] == "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN"
+    assert activation.json()["code"] == "PRODUCTION_RUNTIME_ACTIVATION_HEADER_FORBIDDEN"
     assert oversized.status_code == 413
     assert disabled_service.calls == []
     assert verifier.calls == resolver.calls == service.calls == []
@@ -891,22 +891,22 @@ def test_unclassified_service_failure_is_not_automatically_retried() -> None:
 def test_target_reconciliation_reads_exact_durable_result_while_admission_is_unavailable() -> None:
     command = _target_command()
     activation_id = f"p9act.v1.{'a' * 32}"
-    command_hash = target_e2e_command_hash(command)
+    command_hash = production_runtime_command_hash(command)
     envelope_values = {
-        "schema_version": "target-e2e-graph-command-envelope.v1",
-        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "schema_version": "production-runtime-graph-command-envelope.v1",
+        "execution_lane": "PRODUCTION",
         "activation_id": activation_id,
         "room_fencing_token": 19,
         "command_hash": command_hash,
         "command": command.model_dump(mode="json", exclude_none=True),
     }
-    command_envelope = TargetE2EGraphCommandEnvelope.model_validate(
+    command_envelope = ProductionGraphCommandEnvelope.model_validate(
         {
             **envelope_values,
             "command_envelope_hash": canonical_sha256(envelope_values),
         }
     )
-    binding = GraphTargetE2EBindingSettings(
+    binding = GraphProductionBindingSettings(
         graph_key=command.graph_key,
         graph_version=command.graph_version,
         checkpoint_schema_version=command.checkpoint_schema_version,
@@ -917,7 +917,7 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
         agent_profile_id=command.invocation_context.agent_profile_id,
         prompt_version=command.invocation_context.prompt_profile_id,
         model_profile_id=command.invocation_context.model_profile_id,
-            output_schema_version="target-e2e-room-proposal-source.v1",
+            output_schema_version="production-runtime-room-proposal-source.v1",
         policy_version=command.invocation_context.policy_version,
         guardrail_version=command.invocation_context.guardrail_version,
             tool_policy_version="tools.none.v1",
@@ -926,13 +926,13 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
             allowed_room_types=("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
         allowed_stage_codes=(command.stage_code,),
     )
-    context = GraphTargetE2ERuntimeContextSettings.model_validate(
+    context = GraphProductionRuntimeContextSettings.model_validate(
         {
-            "schemaVersion": "graph-target-e2e-runtime-context.v1",
-            "executionLane": "TARGET_E2E_CANDIDATE",
+            "schemaVersion": "production-runtime-context.v1",
+            "executionLane": "PRODUCTION",
             "activationId": activation_id,
             "activationManifestHash": "f" * 64,
-            "environmentId": "target-e2e-test",
+            "environmentId": "production-runtime-test",
             "environmentGeneration": 7,
             "candidateSha": "3" * 40,
             "issuedAt": "2026-07-27T10:00:00Z",
@@ -944,8 +944,8 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
                 "allowedCaseIds": [command.case_id],
             },
                 "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
-            "composeProject": "p9_target_e2e",
-            "temporalNamespace": "target-e2e-test",
+            "composeProject": "p9_production_runtime",
+            "temporalNamespace": "production-runtime-test",
             "buildBindings": {
                 "caseBuildId": "case-build-1",
                 "controlBuildId": "control-build-1",
@@ -961,13 +961,13 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
             "databaseIdentities": {
                 "domain": {
                     "service": "domain-db",
-                    "database": "target_domain",
+                    "database": "production_domain",
                     "schema": "domain_runtime",
                     "expectedUser": "java_domain_runtime",
                 },
                 "graph": {
                     "service": "graph-db",
-                    "database": "target_graph",
+                    "database": "production_graph",
                     "schema": "graph_runtime",
                     "runtimeUser": "graph_runtime",
                     "environmentGeneration": 7,
@@ -978,8 +978,8 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
             "perCommandManifestAllowed": False,
         }
     )
-    authority = TargetE2ERuntimeAuthority.from_context(context, (binding,))
-    claims = TargetE2EInvocationClaims(
+    authority = ProductionRuntimeAuthority.from_context(context, (binding,))
+    claims = ProductionInvocationClaims(
         iss="java-api-service",
         aud="python-agent-service",
         sub="graph-command",
@@ -988,13 +988,13 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
         exp=1_752_739_260,
         jti="target-reconcile-jti-001",
         **invocation_binding_claims(command),
-        execution_lane="TARGET_E2E_CANDIDATE",
+        execution_lane="PRODUCTION",
         activation_id=activation_id,
         room_fencing_token=19,
         command_hash=command_hash,
         command_envelope_hash=command_envelope.command_envelope_hash,
     )
-    verified = VerifiedTargetE2EInvocation(
+    verified = VerifiedProductionInvocation(
         claims=claims,
         key_id=command.invocation_context.envelope_key_id,
         request_hash=command.request_hash,
@@ -1011,20 +1011,20 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
     )
     nested = RoomGraphResult.model_validate(nested_values)
     result_values = {
-        "schema_version": "target-e2e-graph-result-envelope.v1",
-        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "schema_version": "production-runtime-graph-result-envelope.v1",
+        "execution_lane": "PRODUCTION",
         "activation_id": activation_id,
         "room_fencing_token": 19,
         "command_hash": command_hash,
         "command_envelope_hash": command_envelope.command_envelope_hash,
-        "execution_provider": "target-e2e-composite",
+        "execution_provider": "production-runtime-composite",
         "execution_model": "room-provider-dispatch",
         "result_hash": nested.output_hash,
         "proposal_hash": "7" * 64,
         "graph_output_authority": "PROPOSAL_ONLY",
         "result": nested.model_dump(mode="json", exclude_none=True),
     }
-    result_envelope = TargetE2EGraphResultEnvelope.model_validate(
+    result_envelope = ProductionGraphResultEnvelope.model_validate(
         {
             **result_values,
             "result_envelope_hash": canonical_sha256(result_values),
@@ -1032,13 +1032,13 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
     )
 
     class TargetVerifier:
-        def verify_envelope(self, **_: Any) -> VerifiedTargetE2EInvocation:
+        def verify_envelope(self, **_: Any) -> VerifiedProductionInvocation:
             return verified
 
         def verify_envelope_for_reconciliation(
             self,
             **_: Any,
-        ) -> VerifiedTargetE2EInvocation:
+        ) -> VerifiedProductionInvocation:
             return verified
 
     class TargetThreadResolver:
@@ -1046,10 +1046,10 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
             return _thread(command)
 
     class TargetService(ReconciliationService):
-        async def reconcile_target_e2e(self, **_: Any) -> Any:
-            from app.api.graph_reconciliation_service import TargetE2EReconciliationArtifacts
+        async def reconcile_production_runtime(self, **_: Any) -> Any:
+            from app.api.graph_reconciliation_service import ProductionReconciliationArtifacts
 
-            return TargetE2EReconciliationArtifacts(
+            return ProductionReconciliationArtifacts(
                 envelope=result_envelope,
                 result_ref="urn:graph-result:1",
                 result_hash=result_envelope.result_hash,
@@ -1065,15 +1065,15 @@ def test_target_reconciliation_reads_exact_durable_result_while_admission_is_una
     app.include_router(
         create_graph_reconciliation_router(
             GraphReconciliationEndpointDependencies(
-                mode="TARGET_E2E_CANDIDATE",
+                mode="PRODUCTION",
                 codec=ContractCodec(CONTRACT_ROOT),
                 transport_identity_resolver=IdentityResolver(),
                 envelope_verifier=Verifier(_verified_reconciliation(command)),
                 thread_identity_resolver=ThreadResolver(),
                 reconciliation_service=service,
                 ready=forbidden_command_admission_readiness,
-                target_e2e_envelope_verifier=TargetVerifier(),
-                target_e2e_thread_identity_resolver=TargetThreadResolver(),
+                production_runtime_envelope_verifier=TargetVerifier(),
+                production_runtime_thread_identity_resolver=TargetThreadResolver(),
             )
         )
     )

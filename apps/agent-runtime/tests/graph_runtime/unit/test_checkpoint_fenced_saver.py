@@ -73,12 +73,12 @@ def _candidate_fence() -> GraphFenceContext:
         graph_key="intake.v2",
         graph_version="intake.v2.1",
         checkpoint_schema_version="intake-checkpoint.v2",
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=f"p9act.v1.{'3' * 32}",
         room_fencing_token=11,
         command_hash="4" * 64,
         command_envelope_hash="5" * 64,
-        environment_id="target-e2e-test",
+        environment_id="production-runtime-test",
         environment_generation=7,
         tenant_surrogate="tenant-test",
         case_id="case-test",
@@ -106,7 +106,7 @@ def _completed_start_proof(
     fence: GraphFenceContext | None = None,
 ) -> CompletedStartCheckpoint:
     current = fence or _fence()
-    candidate = current.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
+    candidate = current.execution_lane is GraphGatewayMode.PRODUCTION
     return CompletedStartCheckpoint(
         command_id=("command-candidate-previous" if candidate else "command-previous"),
         request_hash="7" * 64 if candidate else SHA_B,
@@ -444,10 +444,10 @@ class _CandidateFenceConnection:
 
     async def execute(self, query: str, params: Any = None) -> _Cursor:
         normalized = " ".join(query.split()).lower()
-        if "update agent_graph_target_e2e_activation_lifecycle" in normalized:
+        if "update agent_graph_production_runtime_activation_lifecycle" in normalized:
             self.events.append("sql:drain-expired")
             return _Cursor()
-        if "from agent_graph_target_e2e_room_authority" in normalized:
+        if "from agent_graph_production_runtime_room_authority" in normalized:
             self.events.append("sql:room-fence")
             return _Cursor({"room_fencing_token": 11} if self.room_current else None)
         if "from agent_graph_lease" in normalized:

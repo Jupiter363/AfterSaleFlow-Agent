@@ -79,7 +79,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
             String outcomeDefinition = scalar(statement, """
                     select pg_get_constraintdef(oid)
                       from pg_constraint
-                     where conname = 'ck_target_e2e_outcome_completion_shape'
+                     where conname = 'ck_production_runtime_outcome_completion_shape'
                     """);
             String nonExecutionDefinition = scalar(statement, """
                     select pg_get_constraintdef(oid)
@@ -109,7 +109,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
             statement.execute("set session_replication_role = replica");
             try {
                 assertThat(statement.executeUpdate("""
-                        insert into target_e2e_review_epoch_task_binding (
+                        insert into production_runtime_review_epoch_task_binding (
                             epoch_id, tenant_surrogate, case_id, room_epoch,
                             room_fencing_token, review_task_id, plan_id,
                             policy_decision_id, source_handoff_id, created_by
@@ -122,7 +122,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
                         .isEqualTo(1);
 
                 assertThatThrownBy(() -> statement.executeUpdate("""
-                        insert into target_e2e_review_epoch_task_binding (
+                        insert into production_runtime_review_epoch_task_binding (
                             epoch_id, tenant_surrogate, case_id, room_epoch,
                             room_fencing_token, review_task_id, plan_id,
                             policy_decision_id, source_handoff_id, created_by
@@ -136,7 +136,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
                         .hasMessageContaining("ck_review_epoch_task_coordinates");
 
                 assertThat(statement.executeUpdate("""
-                        insert into target_e2e_outcome_completion_fact (
+                        insert into production_runtime_outcome_completion_fact (
                             workflow_id, case_id, outcome_epoch, fencing_token,
                             human_receipt_id, human_receipt_hash, fact_kind,
                             revision, committed_event_sequence, payload_json,
@@ -150,7 +150,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
                         .isEqualTo(1);
 
                 assertThatThrownBy(() -> statement.executeUpdate("""
-                        insert into target_e2e_outcome_completion_fact (
+                        insert into production_runtime_outcome_completion_fact (
                             workflow_id, case_id, outcome_epoch, fencing_token,
                             human_receipt_id, human_receipt_hash, fact_kind,
                             revision, committed_event_sequence, payload_json,
@@ -162,7 +162,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
                         )
                         """))
                         .isInstanceOf(SQLException.class)
-                        .hasMessageContaining("ck_target_e2e_outcome_completion_shape");
+                        .hasMessageContaining("ck_production_runtime_outcome_completion_shape");
 
                 assertThat(statement.executeUpdate(nonExecutionInsert("RNE_ZERO", 0)))
                         .isEqualTo(1);
@@ -198,7 +198,7 @@ class ReviewEpochTaskBindingMigrationIntegrationTest {
 
     private static String nonExecutionInsert(String suffix, long sourceRoomEpoch) {
         return """
-                insert into target_e2e_review_non_execution_completion (
+                insert into production_runtime_review_non_execution_completion (
                     receipt_id, schema_version, tenant_surrogate, case_id,
                     case_workflow_id, case_workflow_run_id, decision_type,
                     decision_record_id, decision_record_hash, command_id,

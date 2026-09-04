@@ -339,7 +339,7 @@ class DurableAgentRunExecutionGatewayTest {
             throws Exception {
         ExecuteAgentRunRequest request = request();
         AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
-                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED",
                 "private target protocol detail",
                 0,
                 false,
@@ -365,7 +365,7 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(failure).isNotSameAs(original);
         assertThat(failure.getCause()).isSameAs(original);
-        assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+        assertThat(failure.errorCode()).isEqualTo("PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED");
         assertThat(failure.recoveryAction()).isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         assertThat(failure.lastSequenceNo()).isEqualTo(1);
         assertThat(failure.publicOutputEmitted()).isFalse();
@@ -388,7 +388,7 @@ class DurableAgentRunExecutionGatewayTest {
                     assertThat(error.payload().finalResultRef()).isNull();
                     assertThat(error.payload().finalResultHash()).isNull();
                     assertThat(error.payload().errorCode())
-                            .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                            .isEqualTo("PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED");
                     assertThat(error.payload().retryable()).isFalse();
                 });
     }
@@ -396,9 +396,9 @@ class DurableAgentRunExecutionGatewayTest {
     @Test
     void doesNotDuplicateAValidRemoteErrorTerminal() throws Exception {
         ExecuteAgentRunRequest request = request();
-        AgentStreamEvent remoteError = errorEvent(request, 1, "TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+        AgentStreamEvent remoteError = errorEvent(request, 1, "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED");
         AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
-                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED",
                 "target Graph returned a terminal error",
                 1,
                 false,
@@ -433,7 +433,7 @@ class DurableAgentRunExecutionGatewayTest {
         GraphReconcileResponse reconciliation = reconciliation(request);
         AgentStreamEvent observedFinal = reconciledFinal(request, reconciliation, 1, NOW);
         AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
-                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED",
                 "the result was unavailable after its final frame",
                 0,
                 false,
@@ -477,7 +477,7 @@ class DurableAgentRunExecutionGatewayTest {
         GraphReconcileResponse reconciliation = reconciliation(request);
         AgentStreamEvent observedFinal = reconciledFinal(request, reconciliation, 1, NOW);
         AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
-                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED",
                 "the result was unavailable after its final frame",
                 0,
                 false,
@@ -511,19 +511,19 @@ class DurableAgentRunExecutionGatewayTest {
         ExecuteAgentRunRequest request = request();
         for (AgentRunExecutionException original : List.of(
                 AgentRunExecutionException.retrySameCommand(
-                        "TARGET_E2E_GRAPH_RETRY",
+                        "PRODUCTION_RUNTIME_GRAPH_RETRY",
                         "retry the sealed command",
                         0,
                         false,
                         null),
                 AgentRunExecutionException.createNextAttempt(
-                        "TARGET_E2E_GRAPH_ABORTED",
+                        "PRODUCTION_RUNTIME_GRAPH_ABORTED",
                         "the remote terminal authorizes a successor attempt",
                         0,
                         false,
                         null),
                 AgentRunExecutionException.reconcileTerminal(
-                        "TARGET_E2E_GRAPH_RECONCILE",
+                        "PRODUCTION_RUNTIME_GRAPH_RECONCILE",
                         "the remote terminal requires reconciliation",
                         0,
                         false,
@@ -556,7 +556,7 @@ class DurableAgentRunExecutionGatewayTest {
     void preservesDurableAppendFailureWhenSyntheticErrorWasNotCommitted() throws Exception {
         ExecuteAgentRunRequest request = request();
         AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
-                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "PRODUCTION_RUNTIME_GRAPH_PROTOCOL_REJECTED",
                 "private target protocol detail",
                 0,
                 false,

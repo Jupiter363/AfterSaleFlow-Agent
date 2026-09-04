@@ -1,0 +1,71 @@
+{
+  "contractVersion": "production-runtime-activation.v1",
+  "activationId": "p9act.v1.fedcba9876543210fedcba9876543210",
+  "manifestHash": "8a6a5180fce14f1846188135b10cb929beb95147aaa60fceb6db8cfa09fef1d7",
+  "executionLane": "PRODUCTION",
+  "environmentId": "p9-isolated-preprod-01",
+  "environmentGeneration": 7,
+  "candidateSha": "8a322ec205e6720ec7ac922cc41b5f79b31815af",
+  "issuedAt": "2026-07-27T10:00:00Z",
+  "expiresAt": "2026-07-27T11:30:00Z",
+  "nonce": "p9-nonce-fedcba9876543210fedcba9876543210",
+  "tenantSurrogate": "tenant-p9-isolated-01",
+  "caseScope": {
+    "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
+    "caseIdPrefix": "CASE_P9_SYNTHETIC_",
+    "maxCases": 4,
+    "fixtureSetId": "p9-synthetic-all-rooms-001",
+    "fixtureSetHash": "81ee5f839e7550e8bf9b13bcf1a43f912cbcd2a6ebb7a592afa1b902f668d396",
+    "containsRealCaseOrPartyData": false,
+    "externalEffectsAllowed": false
+  },
+  "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
+  "buildBindings": {
+    "caseBuildId": "p9-case-8a322ec2",
+    "controlBuildId": "p9-control-8a322ec2",
+    "agentBuildId": "p9-agent-8a322ec2"
+  },
+  "graphBinding": {
+    "key": "all-rooms.production-runtime.v2",
+    "version": "production-runtime-graph.2026-08-18.1",
+    "checkpointSchemaVersion": "production-runtime-checkpoint.v2",
+    "bindingHash": "c3dfb29e3a2a9a8cd0c631a5cf4d098cde8a06ee5632afddb77985b119e3c7ce",
+    "codeBuildId": "p9-graph-8a322ec2"
+  },
+  "imageDigests": {
+    "javaApi": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "temporalControlWorker": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "temporalAgentWorker": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "pythonAgent": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "frontend": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "temporalNamespace": "after-sale-flow-p9-isolated-01",
+  "databaseIdentities": {
+    "domain": {
+      "clusterIdentity": "p9-domain-cluster-01",
+      "databaseIdentity": "p9-domain-db-01",
+      "runtimePrincipalIdentity": "p9-java-domain-runtime-01"
+    },
+    "graph": {
+      "clusterIdentity": "p9-graph-cluster-01",
+      "databaseIdentity": "p9-graph-db-01",
+      "runtimePrincipalIdentity": "p9-python-graph-runtime-01"
+    }
+  },
+  "authority": {
+    "environmentClass": "ISOLATED_PREPRODUCTION",
+    "graphOutputAuthority": "PROPOSAL_ONLY",
+    "graphDomainCredentialsPresent": false,
+    "graphDomainWriteAllowed": false,
+    "formalWriter": "JAVA_FINALIZER_ONLY",
+    "javaDomainCommitAllowed": true,
+    "externalEffectsAllowed": false,
+    "productionTrafficAllowed": false,
+    "productionPromotionAuthority": false,
+    "migrationPromotionAuthority": false
+  },
+  "productionDefaults": {
+    "formalCaseSelector": "LEGACY",
+    "productionActivation": "DISABLED"
+  }
+}

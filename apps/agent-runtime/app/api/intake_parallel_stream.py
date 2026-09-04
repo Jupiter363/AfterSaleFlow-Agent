@@ -33,7 +33,7 @@ from app.graphs.intake.parallel_graph import (
 from app.graphs.intake.parallel_outputs import validate_parallel_frame_output
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.errors import GraphRuntimeError
-from app.graph_runtime.target_e2e import VerifiedTargetE2EInvocation
+from app.graph_runtime.production_runtime import VerifiedProductionInvocation
 from app.contracts.v1.models import RoomGraphCommand
 
 
@@ -428,7 +428,7 @@ class ParallelIntakeFrameStreamService(Protocol):
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ParallelFrameStreamAuthority: ...
 
@@ -436,7 +436,7 @@ class ParallelIntakeFrameStreamService(Protocol):
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
     ) -> OpenedParallelFrameStream: ...
@@ -445,7 +445,7 @@ class ParallelIntakeFrameStreamService(Protocol):
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         admission_receipt: ParallelFrameAdmissionReceipt,
         failure_code: str,

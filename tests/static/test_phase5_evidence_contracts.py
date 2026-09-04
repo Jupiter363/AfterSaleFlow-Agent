@@ -1186,11 +1186,11 @@ def test_target_projection_profile_is_bidirectionally_closed() -> None:
         lambda value: value.update(formal_sink_allowed=True),
         lambda value: value.update(real_case_shadow_allowed=True),
         lambda value: value["version_pins"].update(
-            graph_version="target-e2e-graph.drifted"
+            graph_version="production-runtime-graph.drifted"
         ),
         lambda value: value["version_pins"].update(model_profile_id="model.drifted"),
         lambda value: value["active_graph_run"].update(
-            checkpoint_schema_version="target-e2e-checkpoint.drifted"
+            checkpoint_schema_version="production-runtime-checkpoint.drifted"
         ),
     )
     for mutate in mutations:

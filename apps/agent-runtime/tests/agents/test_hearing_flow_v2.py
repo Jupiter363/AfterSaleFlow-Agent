@@ -13,8 +13,8 @@ from app.agents.hearing_flow import HearingFlowWorkflows, _assert_case_matrix_in
 from app.agents.hearing_intake_v4 import _assert_matrix_integrity
 from app.config import Settings
 from app.contracts.v1.codec import canonicalize
-from app.graph_runtime.target_e2e_room_exchange import (
-    GovernedTargetE2EHearingInvocationDecoder,
+from app.graph_runtime.production_runtime_room_exchange import (
+    GovernedProductionHearingInvocationDecoder,
 )
 from app.graphs.hearing.contracts import HearingOperation
 from app.graphs.hearing.errors import HearingGraphContractError
@@ -618,7 +618,7 @@ def test_intake_questions_still_rejects_tampered_omitted_claim_matrix() -> None:
         )
 
 
-def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_output() -> None:
+def test_production_runtime_hearing_v2_invocation_uses_governed_case_specific_model_output() -> None:
     matrix_payload = _prehearing_case_matrix().model_dump(mode="json")
     matrix_payload["case_overview"] = {
         "neutral_summary": "用户购买加急配送商品，双方对约定送达日期及延迟后替代购买有争议。",
@@ -658,9 +658,9 @@ def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_outp
             }
         }
     )
-    decoder = GovernedTargetE2EHearingInvocationDecoder(HearingFlowWorkflows(runner))
+    decoder = GovernedProductionHearingInvocationDecoder(HearingFlowWorkflows(runner))
     document = {
-        "schema_version": "target-e2e-hearing-invocation.v2",
+        "schema_version": "production-runtime-hearing-invocation.v2",
         "operation": "intake_questions",
         "shared_barrier_receipt_hash": "3" * 64,
         "request": request.model_dump(mode="json"),
@@ -668,7 +668,7 @@ def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_outp
     command = SimpleNamespace(
         case_id=request.case_id,
         stage_sequence=request.stage_sequence,
-        domain_snapshot_ref=SimpleNamespace(uri="urn:target-e2e:hearing:v2", sha256="4" * 64),
+        domain_snapshot_ref=SimpleNamespace(uri="urn:production-runtime:hearing:v2", sha256="4" * 64),
         event_ref=None,
     )
     execution = SimpleNamespace(admission=SimpleNamespace(command=command))
@@ -699,7 +699,7 @@ def test_target_e2e_hearing_v2_invocation_uses_governed_case_specific_model_outp
 
     with pytest.raises(
         HearingGraphContractError,
-        match="TARGET_E2E_HEARING_INVOCATION_REQUIRED",
+        match="PRODUCTION_RUNTIME_HEARING_INVOCATION_REQUIRED",
     ):
         decoder.decode(
             execution=execution,

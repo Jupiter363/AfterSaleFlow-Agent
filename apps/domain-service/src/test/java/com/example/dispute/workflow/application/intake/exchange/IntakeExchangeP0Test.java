@@ -842,8 +842,8 @@ class IntakeExchangeP0Test {
 
     @Test
     void authorityDtoAllowsOnlyThePinnedShadowAndTargetGraphs() {
-        assertThat(authority("all-rooms.target-e2e.v1").graphKey())
-                .isEqualTo("all-rooms.target-e2e.v1");
+        assertThat(authority("all-rooms.production-runtime.v1").graphKey())
+                .isEqualTo("all-rooms.production-runtime.v1");
         assertThatThrownBy(() -> authority("other-graph.v1"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("allowed Intake exchange graph");

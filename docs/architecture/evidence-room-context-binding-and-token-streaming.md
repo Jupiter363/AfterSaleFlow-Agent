@@ -13,16 +13,16 @@
 
 | 绑定 | 当前值 |
 | --- | --- |
-| Target Graph key | `all-rooms.target-e2e.v2` |
-| Target Graph version | `target-e2e-graph.2026-08-18.3` |
-| Target checkpoint | `target-e2e-checkpoint.v2` |
+| Target Graph key | `all-rooms.production-runtime.v2` |
+| Target Graph version | `production-runtime-graph.2026-08-18.3` |
+| Target checkpoint | `production-runtime-checkpoint.v2` |
 | Evidence cognitive graph | `evidence.v2.0.0` |
 | Evidence state | `evidence-graph-state.v2` |
 | Model context | `evidence_room_context.v2` |
 | Provider stream object | `evidence_turn_stream.v3` |
 | Committed frame authority | `evidence-turn-frame.v3` |
 | Evidence result | `evidence-turn-result.v3` |
-| Target Java proposal payload | `target-e2e-evidence-turn-proposal.v2` |
+| Target Java proposal payload | `production-runtime-evidence-turn-proposal.v2` |
 | Cross-service public stream | `agent-stream.v3` |
 | Source catalog | `evidence_source_unit_catalog.v2` |
 | 模型 | `qwen3.8-flash`，thinking 关闭，strict JSON Schema |
@@ -182,8 +182,8 @@ Java 可从已接受 observation 确定性生成 ID、边、投影与公开引�
 
 Evidence 页面只在下列版本完全匹配时消费目标投影：
 
-- Graph `target-e2e-graph.2026-08-18.3`；
-- checkpoint `target-e2e-checkpoint.v2`；
+- Graph `production-runtime-graph.2026-08-18.3`；
+- checkpoint `production-runtime-checkpoint.v2`；
 - state `evidence-graph-state.v2`；
 - assessment `evidence-turn-result.v3`。
 

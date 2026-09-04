@@ -13,10 +13,10 @@ import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyP
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.repository.DomainOperationRepository;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationReceipt;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationReceiptCodec;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphCommandEnvelope;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphEnvelopeCodec;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
@@ -58,7 +58,7 @@ public class IntakeProcessProjectionCompletionService {
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final ObjectMapper materialObjectMapper;
-    private final TargetE2EGraphEnvelopeCodec envelopeCodec;
+    private final ProductionGraphEnvelopeCodec envelopeCodec;
     private final DomainOperationRepository operationRepository;
     private final FencedProcessProjectionService projectionService;
 
@@ -73,7 +73,7 @@ public class IntakeProcessProjectionCompletionService {
                 this.objectMapper
                         .copy()
                         .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
-        this.envelopeCodec = new TargetE2EGraphEnvelopeCodec(this.objectMapper);
+        this.envelopeCodec = new ProductionGraphEnvelopeCodec(this.objectMapper);
         this.operationRepository =
                 Objects.requireNonNull(operationRepository, "operationRepository");
         this.projectionService =
@@ -475,16 +475,16 @@ public class IntakeProcessProjectionCompletionService {
                    and root_attempt.attempt_no = 1
                    and root_attempt.previous_attempt_id is null
                    and root_attempt.command_id = command_row.command_id
-                  join target_e2e_room_epoch_binding room_binding
+                  join production_runtime_room_epoch_binding room_binding
                     on room_binding.epoch_id = run_row.room_epoch_id
-                  join target_e2e_activation activation_row
+                  join production_runtime_activation activation_row
                     on activation_row.activation_id = room_binding.activation_id
-                  join target_e2e_command_admission winner_admission
+                  join production_runtime_command_admission winner_admission
                     on winner_admission.activation_id = activation_row.activation_id
                    and winner_admission.command_id = winner_attempt.command_id
-                  join target_e2e_command_completion winner_completion
+                  join production_runtime_command_completion winner_completion
                     on winner_completion.admission_id = winner_admission.admission_id
-                  join target_e2e_finalization_receipt target_receipt
+                  join production_runtime_finalization_receipt target_receipt
                     on target_receipt.activation_id = activation_row.activation_id
                    and target_receipt.logical_run_id = run_row.id
                   join agent_execution_manifest manifest_row
@@ -514,10 +514,10 @@ public class IntakeProcessProjectionCompletionService {
                                  order by path_attempt.attempt_no
                              ) as attempts_json
                         from path_attempt
-                        join target_e2e_command_admission path_admission
+                        join production_runtime_command_admission path_admission
                           on path_admission.activation_id = activation_row.activation_id
                          and path_admission.command_id = path_attempt.command_id
-                        join target_e2e_intake_command_material path_material
+                        join production_runtime_intake_command_material path_material
                           on path_material.admission_id = path_admission.admission_id
                   ) lineage_proof on true
                  where command_row.tenant_surrogate = :tenantSurrogate
@@ -921,8 +921,8 @@ public class IntakeProcessProjectionCompletionService {
             JsonNode roomBinding,
             JsonNode activation,
             JsonNode run) {
-        requireText(activation, "contract_version", "target-e2e-activation.v1");
-        requireText(activation, "execution_lane", "TARGET_E2E_CANDIDATE");
+        requireText(activation, "contract_version", "production-runtime-activation.v1");
+        requireText(activation, "execution_lane", "PRODUCTION");
         requireText(activation, "tenant_surrogate", evidence.tenantSurrogate());
         requireText(activation, "formal_writer", "JAVA_FINALIZER_ONLY");
         if (!requiredBoolean(activation, "java_domain_commit_allowed")) {
@@ -1044,7 +1044,7 @@ public class IntakeProcessProjectionCompletionService {
             throw new IllegalArgumentException(
                     "attempt command differs from its immutable execution request");
         }
-        TargetE2EGraphCommandEnvelope envelope =
+        ProductionGraphCommandEnvelope envelope =
                 envelopeCodec.wrapCommand(
                         target.activationId(), target.roomFencingToken(), command);
 
@@ -1117,7 +1117,7 @@ public class IntakeProcessProjectionCompletionService {
         }
 
         requireText(material, "admission_id", requiredText(admission, "admission_id"));
-        requireText(material, "material_schema_version", "target-e2e-intake-command-material.v1");
+        requireText(material, "material_schema_version", "production-runtime-intake-command-material.v1");
         requireText(
                 material,
                 "context_schema_version",
@@ -1319,7 +1319,7 @@ public class IntakeProcessProjectionCompletionService {
             JsonNode formalEvent) {
         IntakeFinalizationReceipt formalReceipt = evidence.receipt();
         RoomGraphCommand command = winner.command();
-        TargetE2EGraphCommandEnvelope envelope = winner.envelope();
+        ProductionGraphCommandEnvelope envelope = winner.envelope();
 
         requireText(
                 winnerAdmission,
@@ -1366,14 +1366,14 @@ public class IntakeProcessProjectionCompletionService {
                 "graph_checkpoint_schema_version",
                 command.checkpointSchemaVersion());
 
-        TargetE2eFinalizationReceipt targetReceipt =
-                TargetE2eFinalizationReceiptCodec.decodeCanonical(
+        ProductionFinalizationReceipt targetReceipt =
+                ProductionFinalizationReceiptCodec.decodeCanonical(
                         Objects.requireNonNull(
                                 targetReceiptCanonicalBytes,
                                 "target receipt canonical bytes"));
         if (!MessageDigest.isEqual(
                 targetReceiptCanonicalBytes,
-                TargetE2eFinalizationReceiptCodec.canonicalBytes(targetReceipt))) {
+                ProductionFinalizationReceiptCodec.canonicalBytes(targetReceipt))) {
             throw new IllegalArgumentException("target receipt bytes changed after decoding");
         }
         validateStoredTargetReceipt(
@@ -1409,7 +1409,7 @@ public class IntakeProcessProjectionCompletionService {
             JsonNode run,
             ValidatedRecoveredAttempt winner,
             JsonNode row,
-            TargetE2eFinalizationReceipt receipt) {
+            ProductionFinalizationReceipt receipt) {
         requireText(row, "schema_version", receipt.schemaVersion());
         requireNonBlank(row, "receipt_id");
         requireText(row, "execution_lane", receipt.executionLane());
@@ -1493,7 +1493,7 @@ public class IntakeProcessProjectionCompletionService {
             ValidatedRecoveredAttempt winner,
             JsonNode manifest,
             JsonNode outputSnapshot,
-            TargetE2eFinalizationReceipt targetReceipt) {
+            ProductionFinalizationReceipt targetReceipt) {
         RoomGraphCommand command = winner.command();
         requireText(manifest, "schema_version", "agent-execution-manifest.v1");
         requireText(manifest, "id", requiredText(run, "committed_manifest_id"));
@@ -1590,7 +1590,7 @@ public class IntakeProcessProjectionCompletionService {
             JsonNode formalOperation,
             JsonNode formalEvent,
             RoomGraphCommand winnerCommand,
-            TargetE2eFinalizationReceipt targetReceipt,
+            ProductionFinalizationReceipt targetReceipt,
             IntakeFinalizationReceipt formalReceipt) {
         requireSha256(formalOperation, "request_hash");
         String formalRequestHash = requiredText(formalOperation, "request_hash");
@@ -2073,7 +2073,7 @@ public class IntakeProcessProjectionCompletionService {
             IntakeTargetAgentRunContext target,
             ExecuteAgentRunRequest request,
             RoomGraphCommand command,
-            TargetE2EGraphCommandEnvelope envelope) {}
+            ProductionGraphCommandEnvelope envelope) {}
 
     private record ProjectionOperation(
             String operationType,

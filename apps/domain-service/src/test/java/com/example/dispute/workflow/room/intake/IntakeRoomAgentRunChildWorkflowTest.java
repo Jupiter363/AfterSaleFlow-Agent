@@ -3393,7 +3393,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
         CHECKPOINT_SCHEMA,
         "p9-prompt-v1",
         "p9-model-v1",
-        "target-e2e-intake-output.v1",
+        "production-runtime-intake-output.v1",
         "p9-policy-v1",
         "p9-guardrail-v1",
         "p9-tools-v1",
@@ -3415,11 +3415,11 @@ class IntakeRoomAgentRunChildWorkflowTest {
         CONTROL_BUILD,
         GRAPH_VERSION,
         CHECKPOINT_SCHEMA,
-        "all-rooms-prompt.target-e2e.v2",
-        "target-e2e.contract-blocked",
-        "target-e2e-intake-output.v1",
-        "all-rooms-policy.target-e2e.v1",
-        "all-rooms-guardrail.target-e2e.v1",
+        "all-rooms-prompt.production-runtime.v2",
+        "production-runtime.contract-blocked",
+        "production-runtime-intake-output.v1",
+        "all-rooms-policy.production-runtime.v1",
+        "all-rooms-guardrail.production-runtime.v1",
         "tools.none.v1",
         INITIATOR_SCOPE,
         RESPONDENT_SCOPE);
@@ -3809,7 +3809,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
                 1024),
             new RoomGraphCommand.SnapshotRef(
                 "EVENT_" + command.commandId(),
-                "target-e2e-intake-message.v1",
+                "production-runtime-intake-message.v1",
                 command.payloadRef(),
                 command.payloadHash(),
                 128),
@@ -3817,7 +3817,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
                 "p9-intake-agent",
                 "p9-prompt-v1",
                 "p9-model-v1",
-                "target-e2e-intake-output.v1",
+                "production-runtime-intake-output.v1",
                 "p9-policy-v1",
                 "p9-guardrail-v1",
                 List.of(),
@@ -4569,7 +4569,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
           new RoomGraphResult.ExecutionMetadata(
               "p9-prompt-v1",
               "p9-model-v1",
-              "target-e2e-intake-output.v1",
+              "production-runtime-intake-output.v1",
               "p9-policy-v1",
               "p9-guardrail-v1"));
     }
@@ -4667,7 +4667,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
           new RoomGraphResult.ExecutionMetadata(
               "p9-prompt-v1",
               "p9-model-v1",
-              "target-e2e-intake-output.v1",
+              "production-runtime-intake-output.v1",
               "p9-policy-v1",
               "p9-guardrail-v1"));
     }

@@ -1000,8 +1000,8 @@ outage, projection drift, and region failover.
 
 ## 20. Versioning and deployment
 
-The current UAT-aligned source identity is `all-rooms.target-e2e.v2` /
-`target-e2e-graph.2026-08-18.3` / `target-e2e-checkpoint.v2`. Intake V4 uses
+The current UAT-aligned source identity is `all-rooms.production-runtime.v2` /
+`production-runtime-graph.2026-08-18.3` / `production-runtime-checkpoint.v2`. Intake V4 uses
 `PARALLEL_FRAMES_V1` and `agent-stream.v4`; the other target rooms use
 `agent-stream.v3`. All model lanes currently resolve through `qwen3.8-flash` with
 thinking disabled and strict JSON Schema enabled.
@@ -1096,7 +1096,7 @@ Current compatibility boundaries remain deliberate:
 3. V3/V4 stream contracts, Graph migration history, Flyway migration history and
    Temporal history fixtures remain in the repository while any persisted data can
    reference them.
-4. Target E2E execution remains an explicit, fail-closed lane. Browser UAT proves the
+4. Production Runtime execution remains an explicit, fail-closed lane. Browser UAT proves the
    candidate path, not automatic production enablement.
 5. The Compose default remains a repository configuration decision. The separately
    authorized Temporal 1.29.7 UAT environment is platform evidence, not permission for

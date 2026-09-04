@@ -64,7 +64,7 @@ from app.graph_runtime.recovery import PostgresRecoveryCoordinator
 from app.graph_runtime.registry import CommandProfileBinding
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from app.graph_runtime.restore_validation import GraphRestoreValidationRunner
-from app.graph_runtime.target_e2e import TargetE2ERoomProposal, TargetE2ERoomProposalSource
+from app.graph_runtime.production_runtime import ProductionRoomProposal, ProductionRoomProposalSource
 from app.security.invocation_envelope import INVOCATION_CLOCK_SKEW_SECONDS
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -393,7 +393,7 @@ async def test_real_g008_allows_only_the_fresh_zero_to_two_bootstrap_transition(
     graph_key = f"fresh_bootstrap_{uuid4().hex[:12]}"
     graph_version = "fresh_bootstrap.v1"
     checkpoint_schema_version = "fresh_bootstrap.v1"
-    execution_lane = "TARGET_E2E_CANDIDATE"
+    execution_lane = "PRODUCTION"
     activation_id = "p9act.v1." + "a" * 32
     room_fencing_token = 31
     command_fencing_token = 37
@@ -3218,7 +3218,7 @@ async def test_candidate_reconciliation_proof_uses_verified_admission_clock_wind
         return replace(
             base,
             thread_id=thread_id,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=activation_id,
             room_fencing_token=11,
             command_hash="a" * 64,
@@ -3228,17 +3228,17 @@ async def test_candidate_reconciliation_proof_uses_verified_admission_clock_wind
     def candidate_result(binding: CommandBinding):
         logical_run_id = str(binding.request_json["logical_run_id"])
         attempt_id = str(binding.request_json["attempt_id"])
-        source = TargetE2ERoomProposalSource(
-            schema_version="target-e2e-room-proposal-source.v1",
+        source = ProductionRoomProposalSource(
+            schema_version="production-runtime-room-proposal-source.v1",
             room_type="HEARING",
-            proposal=TargetE2ERoomProposal(
-                schema_version="target-e2e-hearing-proposal.v1",
+            proposal=ProductionRoomProposal(
+                schema_version="production-runtime-hearing-proposal.v1",
                 proposal_id=f"proposal-{binding.command_id}",
                 command_id=binding.command_id,
                 logical_run_id=logical_run_id,
                 attempt_id=attempt_id,
                 payload_schema_version="hearing-proposal.v1",
-                payload_ref=f"urn:target-e2e:proposal:{binding.command_id}",
+                payload_ref=f"urn:production-runtime:proposal:{binding.command_id}",
                 payload_hash="f" * 64,
                 terminal_class="COMPLETED",
                 formal_authority=False,
@@ -3254,12 +3254,12 @@ async def test_candidate_reconciliation_proof_uses_verified_admission_clock_wind
             graph_key=binding.graph_key,
             graph_version=binding.graph_version,
             checkpoint_schema_version=binding.checkpoint_schema_version,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=activation_id,
             room_fencing_token=11,
             command_hash="a" * 64,
             command_envelope_hash="b" * 64,
-            execution_provider="target-e2e-test",
+            execution_provider="production-runtime-test",
             execution_model="candidate-proof-model",
             environment_id="candidate-proof-env",
             environment_generation=1,
@@ -3320,7 +3320,7 @@ async def test_candidate_reconciliation_proof_uses_verified_admission_clock_wind
                     result_ref, result_hash, result_checkpointed_at, registered_at
                 ) values (
                     %s, %s, %s, %s::jsonb, %s,
-                    'TARGET_E2E_CANDIDATE', %s, %s, %s, %s,
+                    'PRODUCTION', %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s,
                     %s, 'RESULT_CHECKPOINTED', 1, 1,
@@ -3476,7 +3476,7 @@ async def test_candidate_reconciliation_proof_uses_verified_admission_clock_wind
         )
         await connection.execute(
             """
-            insert into agent_graph_target_e2e_activation (
+            insert into agent_graph_production_runtime_activation (
                 activation_id, run_nonce, context_hash, environment_id,
                 environment_generation, candidate_sha, tenant_surrogate, case_scope,
                 allowed_room_types, temporal_namespace, context_json, issued_at, expires_at
@@ -4042,7 +4042,7 @@ async def _seed_executable_command(
 
 
 @pytest.mark.asyncio
-async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
+async def test_production_runtime_graph_purge_is_exact_audited_and_retention_owned(
     graph_database: _Database,
 ) -> None:
     await _migration_runner(graph_database).run()
@@ -4114,7 +4114,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
             )
             connection.execute(
                 """
-                insert into agent_graph_target_e2e_activation (
+                insert into agent_graph_production_runtime_activation (
                     activation_id, run_nonce, context_hash, environment_id,
                     environment_generation, candidate_sha, tenant_surrogate,
                     case_scope, allowed_room_types, temporal_namespace,
@@ -4139,7 +4139,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
             )
             connection.execute(
                 """
-                insert into agent_graph_target_e2e_room_authority (
+                insert into agent_graph_production_runtime_room_authority (
                     tenant_surrogate, case_id, room_type, activation_id,
                     room_epoch, room_fencing_token
                 ) values (%s, %s, 'INTAKE', %s, 1, 1)
@@ -4187,7 +4187,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
                     command_hash, command_envelope_hash
                 ) values (
                     %s, %s, 'room-graph-command.v1', '{}'::jsonb, %s,
-                    'TARGET_E2E_CANDIDATE', 1,
+                    'PRODUCTION', 1,
                     %s, %s, %s,
                     'prompt.v1', 'model.v1', 'output.v1',
                     'policy.v1', 'guardrail.v1', 'tools.v1',
@@ -4204,7 +4204,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
                     graph_key,
                     graph_version,
                     checkpoint_schema_version,
-                    f"urn:target-e2e:result:intake:{result_hash}",
+                    f"urn:production-runtime:result:intake:{result_hash}",
                     result_hash,
                     activation_id,
                     "6" * 64,
@@ -4234,7 +4234,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
                     proposal_source_json, result_envelope_json
                 ) values (
                     %s, %s, %s, %s,
-                    'TARGET_E2E_CANDIDATE', 'room-graph-result.v1',
+                    'PRODUCTION', 'room-graph-result.v1',
                     'intake', 'purge-checkpoint-1', 1,
                     'COMPLETED', '{}'::jsonb, %s, %s,
                     '{}'::jsonb, %s, 1,
@@ -4247,7 +4247,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
                     thread_id,
                     command_id,
                     request_hash,
-                    f"urn:target-e2e:result:intake:{result_hash}",
+                    f"urn:production-runtime:result:intake:{result_hash}",
                     result_hash,
                     activation_id,
                     "6" * 64,
@@ -4286,7 +4286,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
             )
 
     call_sql = """
-        select purge_target_e2e_test_graph_thread(
+        select purge_production_runtime_test_graph_thread(
             %s, %s, %s, 17, %s, 'reviewer-local', 'PLATFORM_REVIEWER', %s, %s::jsonb
         ) as receipt_id
     """
@@ -4322,7 +4322,7 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
             """
             select purge_receipt_id, case_id, thread_id, activation_id,
                    reviewer_role, purged_row_counts
-              from agent_graph_target_e2e_purge_receipt
+              from agent_graph_production_runtime_purge_receipt
              where purge_receipt_id = %s
             """,
             (receipt_id,),
@@ -4350,8 +4350,8 @@ async def test_target_e2e_graph_purge_is_exact_audited_and_retention_owned(
               (select count(*) from agent_graph_result where thread_id = %s),
               (select count(*) from agent_graph_invocation_nonce where thread_id = %s),
               (select count(*) from checkpoints where thread_id = %s),
-              (select count(*) from agent_graph_target_e2e_activation where activation_id = %s),
-              (select count(*) from agent_graph_target_e2e_room_authority where case_id = %s)
+              (select count(*) from agent_graph_production_runtime_activation where activation_id = %s),
+              (select count(*) from agent_graph_production_runtime_room_authority where case_id = %s)
             """,
             (
                 thread_id,

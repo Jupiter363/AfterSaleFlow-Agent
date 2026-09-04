@@ -409,7 +409,7 @@ class IntakeRoomWorkflowActivityTest {
                   .envelope()
                   .pinnedVersions()
                   .outputSchemaVersion())
-          .isEqualTo("target-e2e-room-proposal-source.v1");
+          .isEqualTo("production-runtime-room-proposal-source.v1");
     }
   }
 
@@ -436,7 +436,7 @@ class IntakeRoomWorkflowActivityTest {
                     "intake-checkpoint.v2",
                     "intake-prompt.v2",
                     "intake-model.synthetic.v1",
-                    "target-e2e-room-proposal-source.v1",
+                    "production-runtime-room-proposal-source.v1",
                     "intake-policy.v2",
                     "intake-guardrail.v2",
                     "no-tools.v1"))
@@ -1306,11 +1306,11 @@ class IntakeRoomWorkflowActivityTest {
         "control-build-p9",
         "2.0.0",
         "intake-checkpoint.v2",
-        "all-rooms-prompt.target-e2e.v2",
-        "target-e2e.contract-blocked",
-        "target-e2e-intake-output.v1",
-        "all-rooms-policy.target-e2e.v1",
-        "all-rooms-guardrail.target-e2e.v1",
+        "all-rooms-prompt.production-runtime.v2",
+        "production-runtime.contract-blocked",
+        "production-runtime-intake-output.v1",
+        "all-rooms-policy.production-runtime.v1",
+        "all-rooms-guardrail.production-runtime.v1",
         "tools.none.v1",
         INITIATOR_SCOPE,
         RESPONDENT_SCOPE);
@@ -1324,7 +1324,7 @@ class IntakeRoomWorkflowActivityTest {
         start.checkpointSchemaVersion(),
         start.promptVersion(),
         start.modelProfileId(),
-        "target-e2e-room-proposal-source.v1",
+        "production-runtime-room-proposal-source.v1",
         start.policyVersion(),
         start.guardrailVersion(),
         start.toolPolicyVersion());

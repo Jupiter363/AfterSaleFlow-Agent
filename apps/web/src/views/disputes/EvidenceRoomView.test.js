@@ -223,7 +223,7 @@ function targetTemporalProjection(count, overrides = {}) {
     schema_version: "evidence-process-projection.v1",
     projection_state: "AVAILABLE",
     writer_mode: "TEMPORAL",
-    graph_runtime_mode: "TARGET_E2E_CANDIDATE",
+    graph_runtime_mode: "PRODUCTION",
     formal_sink_allowed: false,
     temporal_evidence_allocation_allowed: true,
     real_case_shadow_allowed: false,
@@ -240,15 +240,15 @@ function targetTemporalProjection(count, overrides = {}) {
     recovery: { state: "NONE" },
     version_pins: {
       workflow_build_id: "control-build.991ec9c5",
-      graph_version: "target-e2e-graph.2026-08-18.3",
-      checkpoint_schema_version: "target-e2e-checkpoint.v2",
+      graph_version: "production-runtime-graph.2026-08-18.3",
+      checkpoint_schema_version: "production-runtime-checkpoint.v2",
       state_schema_version: "evidence-graph-state.v2",
-      prompt_version: "all-rooms-prompt.target-e2e.v2",
-      model_profile_id: "target-e2e.contract-blocked",
+      prompt_version: "all-rooms-prompt.production-runtime.v2",
+      model_profile_id: "production-runtime.contract-blocked",
       assessment_output_schema_version: "evidence-item-assessment.v1",
       terminal_output_schema_version: "evidence-batch-proposal.v1",
-      policy_version: "all-rooms-policy.target-e2e.v1",
-      guardrail_version: "all-rooms-guardrail.target-e2e.v1",
+      policy_version: "all-rooms-policy.production-runtime.v1",
+      guardrail_version: "all-rooms-guardrail.production-runtime.v1",
       tool_policy_version: "tools.none.v1",
     },
     ...overrides,
@@ -2504,12 +2504,12 @@ describe("EvidenceRoomView", () => {
         id: "USER_FRESH",
         sequence_no: 2,
         sender_role: "USER",
-        message_text: "Fresh user thread wins.",
+        message_text: "Fresh current thread wins.",
       },
     ]);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Fresh user thread wins.");
+    expect(wrapper.text()).toContain("Fresh current thread wins.");
     expect(wrapper.text()).not.toContain("Stale merchant thread must not overwrite user view.");
   });
 
@@ -2735,7 +2735,7 @@ describe("EvidenceRoomView", () => {
     });
 
     const projection = wrapper.get("[data-evidence-process-projection]");
-    expect(projection.attributes("data-projection-mode")).toBe("TARGET_E2E_CANDIDATE");
+    expect(projection.attributes("data-projection-mode")).toBe("PRODUCTION");
     expect(projection.attributes("data-projection-count")).toBe("1");
     expect(projection.text()).toContain("Temporal 证据流程");
     expect(projection.text()).toContain("1 项证据");
@@ -2745,7 +2745,7 @@ describe("EvidenceRoomView", () => {
 
   it("locks target writes when the public target profile is incomplete", async () => {
     const invalid = targetTemporalProjection(1);
-    invalid.version_pins.graph_version = "target-e2e-graph.drifted";
+    invalid.version_pins.graph_version = "production-runtime-graph.drifted";
     const { wrapper } = await mountView({ initialProcessProjection: invalid });
 
     expect(wrapper.get("[data-evidence-process-projection]").attributes("data-projection-mode"))

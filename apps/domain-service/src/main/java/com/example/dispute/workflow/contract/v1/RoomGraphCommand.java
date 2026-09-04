@@ -48,7 +48,7 @@ public record RoomGraphCommand(
     public static final String PARALLEL_INTAKE_AGENT_PROFILE_ID =
             "dispute-intake-officer.parallel-frames.v1";
     public static final String PARALLEL_INTAKE_OUTPUT_SCHEMA =
-            "target-e2e-room-proposal-source.v2";
+            "production-runtime-room-proposal-source.v2";
 
     /** Legacy constructor kept so non-parallel command producers preserve their canonical shape. */
     public RoomGraphCommand(

@@ -12,9 +12,9 @@
 
 | 绑定 | 当前值 |
 | --- | --- |
-| Graph key | `all-rooms.target-e2e.v2` |
-| Graph version | `target-e2e-graph.2026-08-18.3` |
-| Checkpoint schema | `target-e2e-checkpoint.v2` |
+| Graph key | `all-rooms.production-runtime.v2` |
+| Graph version | `production-runtime-graph.2026-08-18.3` |
+| Checkpoint schema | `production-runtime-checkpoint.v2` |
 | 新 Intake execution profile | `PARALLEL_FRAMES_V1` |
 | 历史兼容 profile | `MONOLITHIC_V3` |
 | 并行公开流 | `agent-stream.v4` |

@@ -48,8 +48,8 @@ from app.graph_runtime.evidence_turn_executor import (
     _EvidencePreviewBridge,
 )
 from app.graph_runtime.errors import GraphContractError
-from app.graph_runtime.executor import TargetE2ESpecializedRoomProviderFactory
-from app.graph_runtime.production_bindings import _build_target_e2e_evidence_workflow
+from app.graph_runtime.executor import ProductionSpecializedRoomProviderFactory
+from app.graph_runtime.production_bindings import _build_production_runtime_evidence_workflow
 from app.schemas import EvidenceTurnRequest
 from app.streaming import AgentStreamObserver, bind_stream_observer
 
@@ -63,11 +63,11 @@ from test_evidence_clerk_turn import (  # noqa: E402
 
 def _provider_binding_execution(prompt_profile_id: str) -> SimpleNamespace:
     invocation = InvocationContext(
-        agent_profile_id="all-rooms-agent.target-e2e.v1",
+        agent_profile_id="all-rooms-agent.production-runtime.v1",
         prompt_profile_id=prompt_profile_id,
-        model_profile_id="target-e2e.formal-evidence",
-        output_schema_version="target-e2e-room-proposal-source.v2",
-        policy_version="target-e2e.proposal-only.v1",
+        model_profile_id="production-runtime.formal-evidence",
+        output_schema_version="production-runtime-room-proposal-source.v2",
+        policy_version="production-runtime.proposal-only.v1",
         guardrail_version="evidence-guardrail.v1",
         tool_capabilities=(),
         envelope_key_id="JAVA_GRAPH_COMMAND_ES256_TEST",
@@ -87,7 +87,7 @@ def _provider_binding_execution(prompt_profile_id: str) -> SimpleNamespace:
 
 
 def test_target_evidence_provider_prompt_requires_single_command_authority() -> None:
-    prompt_version = "all-rooms-prompt.target-e2e.v2"
+    prompt_version = "all-rooms-prompt.production-runtime.v2"
     execution = _provider_binding_execution(prompt_version)
     legacy_document = _java_evidence_opening_command_payload()
     legacy_request = EvidenceTurnRequest.model_validate(legacy_document)
@@ -113,7 +113,7 @@ def test_target_evidence_provider_prompt_requires_single_command_authority() -> 
 
     assert provider_request.agent_context.prompt_profile_id == prompt_version
     assert bound_request.agent_context.model_profile_id is None
-    assert provider_request.agent_context.model_profile_id == "target-e2e.formal-evidence"
+    assert provider_request.agent_context.model_profile_id == "production-runtime.formal-evidence"
 
 
 def _opening_frames(request: EvidenceTurnRequest) -> list[dict[str, object]]:
@@ -1149,7 +1149,7 @@ def test_v2_material_leading_frame_uses_frozen_attachment_authority() -> None:
     }
 
 
-def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:
+def test_production_runtime_binding_is_exactly_the_v2_evidence_workflow() -> None:
     from types import SimpleNamespace
 
     from app.llm import LiteLlmProxyClient
@@ -1158,7 +1158,7 @@ def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:
         java_api_service_url="http://127.0.0.1:8080",
         java_service_secret="test-secret",
     )
-    workflow = _build_target_e2e_evidence_workflow(
+    workflow = _build_production_runtime_evidence_workflow(
         settings=settings,
         structured_client=LiteLlmProxyClient(
             "http://127.0.0.1:1",
@@ -1171,7 +1171,7 @@ def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:
     assert callable(workflow.run)
     assert callable(workflow.arun)
 
-    factory = TargetE2ESpecializedRoomProviderFactory(
+    factory = ProductionSpecializedRoomProviderFactory(
         security_runtime=object(),
         room_exchange=object(),
     )
@@ -1185,6 +1185,6 @@ def test_target_e2e_binding_is_exactly_the_v2_evidence_workflow() -> None:
 
     with pytest.raises(
         GraphContractError,
-        match="TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED",
+        match="PRODUCTION_RUNTIME_FORMAL_EVIDENCE_WORKFLOW_REQUIRED",
     ):
         factory.with_evidence_workflow(RetiredWorkflow())

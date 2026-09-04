@@ -771,14 +771,14 @@ class HearingFlowWorkflows:
         )
         return result_type.model_validate(result["proposal"])
 
-    def target_e2e_invocation(
+    def production_runtime_invocation(
         self,
         operation: HearingOperation,
         request: Any,
         *,
         agent_context: AgentInvocationContext | None = None,
     ) -> HearingGraphInvocation:
-        """Bind a frozen target-E2E request to the governed Hearing model operation."""
+        """Bind a frozen production-runtime request to the governed Hearing model operation."""
 
         execute = {
             HearingOperation.INTAKE_QUESTIONS: self._aintake_questions_proposal,
@@ -790,7 +790,7 @@ class HearingFlowWorkflows:
             HearingOperation.JUDGE_V2: self._ajudge_v2_proposal,
         }.get(operation)
         if execute is None:
-            raise AgentOutputSchemaError("hearing_target_e2e", "unsupported Hearing operation")
+            raise AgentOutputSchemaError("hearing_production_runtime", "unsupported Hearing operation")
         return self._invocation(
             operation,
             request,

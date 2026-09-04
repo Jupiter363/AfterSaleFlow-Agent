@@ -12,7 +12,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from app.graph_runtime.target_e2e_room_adapters import TargetE2EObjectEvidenceAssetLoader
+from app.graph_runtime.production_runtime_room_adapters import ProductionObjectEvidenceAssetLoader
 from app.graphs.evidence.contracts import (
     EvidenceAdmissionRequest,
     EvidenceAdmissionVerifier,
@@ -20,7 +20,7 @@ from app.graphs.evidence.contracts import (
 from app.security.graph_runtime import _open_for_lifecycle
 
 
-_FIXTURE_ENV = "TARGET_E2E_JAVA_EVIDENCE_FIXTURE"
+_FIXTURE_ENV = "PRODUCTION_RUNTIME_JAVA_EVIDENCE_FIXTURE"
 
 
 class _FixtureObjectStore:
@@ -91,7 +91,7 @@ def test_java_published_evidence_manifest_is_admitted_and_asset_is_exactly_loade
                 runtime_mode="SHADOW",
                 room_graph_command=fixture["command"],
                 signed_manifest_payload=manifest_payload,
-                registry_output_schema_version="target-e2e-room-proposal-source.v1",
+                registry_output_schema_version="production-runtime-room-proposal-source.v1",
                 graph_lease_fencing_token=fixture["graph_lease_fencing_token"],
             )
         )
@@ -101,7 +101,7 @@ def test_java_published_evidence_manifest_is_admitted_and_asset_is_exactly_loade
 
         item = manifest["items"][0]
         store = _FixtureObjectStore({item["parse_ref"]: asset_payload})
-        loaded = runner.run(TargetE2EObjectEvidenceAssetLoader(store).load(item))
+        loaded = runner.run(ProductionObjectEvidenceAssetLoader(store).load(item))
 
         assert loaded.content == asset["content"]
         assert store.references[0].uri == item["parse_ref"]

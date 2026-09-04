@@ -19,37 +19,37 @@ from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import CommandBinding, CommandRecord, CommandStatus, ResultRecord
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.registry import RegistryRecord
-from app.graph_runtime.target_e2e import (
-    TargetE2EGraphResultEnvelope,
-    TargetE2ERoomProposalSource,
-    VerifiedTargetE2EInvocation,
+from app.graph_runtime.production_runtime import (
+    ProductionGraphResultEnvelope,
+    ProductionRoomProposalSource,
+    VerifiedProductionInvocation,
 )
 from app.security.invocation_envelope import VerifiedReconciliation
 
 
 @dataclass(frozen=True, slots=True)
-class TargetE2EReconciliationArtifacts:
+class ProductionReconciliationArtifacts:
     """Validated durable selectors returned with one target result envelope."""
 
-    envelope: TargetE2EGraphResultEnvelope
+    envelope: ProductionGraphResultEnvelope
     result_ref: str
     result_hash: str
     proposal_hash: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.envelope, TargetE2EGraphResultEnvelope):
-            raise TypeError("target-E2E reconciliation envelope is invalid")
+        if not isinstance(self.envelope, ProductionGraphResultEnvelope):
+            raise TypeError("production-runtime reconciliation envelope is invalid")
         if (
             not isinstance(self.result_ref, str)
             or not self.result_ref
             or len(self.result_ref) > 512
             or any(character.isspace() for character in self.result_ref)
         ):
-            raise ValueError("target-E2E result reference is invalid")
+            raise ValueError("production-runtime result reference is invalid")
         if self.result_hash != self.envelope.result_hash:
-            raise ValueError("target-E2E result hash differs from its envelope")
+            raise ValueError("production-runtime result hash differs from its envelope")
         if self.proposal_hash != self.envelope.proposal_hash:
-            raise ValueError("target-E2E proposal hash differs from its envelope")
+            raise ValueError("production-runtime proposal hash differs from its envelope")
 
 
 class GraphReconciliationGatewayPort(Protocol):
@@ -66,7 +66,7 @@ class GraphReconciliationGatewayPort(Protocol):
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ResultRecord: ...
 
@@ -80,23 +80,23 @@ class GraphReconciliationService(Protocol):
         expected_thread: ThreadIdentity,
     ) -> GraphReconcileResponse: ...
 
-    async def reconcile_target_e2e(
+    async def reconcile_production_runtime(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
-    ) -> TargetE2EReconciliationArtifacts: ...
+    ) -> ProductionReconciliationArtifacts: ...
 
-    async def retrieve_target_e2e_proposal_source(
+    async def retrieve_production_runtime_proposal_source(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         expected_result_ref: str,
         expected_proposal_hash: str,
-    ) -> TargetE2ERoomProposalSource: ...
+    ) -> ProductionRoomProposalSource: ...
 
 
 class GatewayBackedGraphReconciliationService:
@@ -139,13 +139,13 @@ class GatewayBackedGraphReconciliationService:
         finally:
             await self._gate.leave(token)
 
-    async def reconcile_target_e2e(
+    async def reconcile_production_runtime(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
-    ) -> TargetE2EReconciliationArtifacts:
+    ) -> ProductionReconciliationArtifacts:
         token = await self._gate.enter()
         try:
             result = await self._gateway.reconcile_candidate_only(
@@ -161,7 +161,7 @@ class GatewayBackedGraphReconciliationService:
                 raise GraphTerminalBindingError(
                     "candidate reconciliation has no proposal hash"
                 )
-            return TargetE2EReconciliationArtifacts(
+            return ProductionReconciliationArtifacts(
                 envelope=envelope,
                 result_ref=result.result_ref,
                 result_hash=result.result_hash,
@@ -170,15 +170,15 @@ class GatewayBackedGraphReconciliationService:
         finally:
             await self._gate.leave(token)
 
-    async def retrieve_target_e2e_proposal_source(
+    async def retrieve_production_runtime_proposal_source(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
         expected_result_ref: str,
         expected_proposal_hash: str,
-    ) -> TargetE2ERoomProposalSource:
+    ) -> ProductionRoomProposalSource:
         token = await self._gate.enter()
         try:
             result = await self._gateway.reconcile_candidate_only(
@@ -208,19 +208,19 @@ class GatewayBackedGraphReconciliationService:
     @staticmethod
     def _validated_candidate_artifacts(
         result: ResultRecord,
-        verified_invocation: VerifiedTargetE2EInvocation,
-    ) -> tuple[TargetE2EGraphResultEnvelope, TargetE2ERoomProposalSource]:
+        verified_invocation: VerifiedProductionInvocation,
+    ) -> tuple[ProductionGraphResultEnvelope, ProductionRoomProposalSource]:
         if not isinstance(result, ResultRecord) or (
-            result.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            result.execution_lane is not GraphGatewayMode.PRODUCTION
         ):
             raise GraphTerminalBindingError(
                 "candidate reconciliation returned an invalid durable result"
             )
         try:
-            envelope = TargetE2EGraphResultEnvelope.model_validate(
+            envelope = ProductionGraphResultEnvelope.model_validate(
                 result.result_envelope_json
             )
-            proposal_source = TargetE2ERoomProposalSource.model_validate(
+            proposal_source = ProductionRoomProposalSource.model_validate(
                 result.proposal_source_json
             )
             nested = RoomGraphResult.model_validate(result.result_json)

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 
 LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-TARGET_E2E_ACTIVATION_ID = re.compile(r"^p9act\.v1\.[0-9a-f]{32}$")
+PRODUCTION_RUNTIME_ACTIVATION_ID = re.compile(r"^p9act\.v1\.[0-9a-f]{32}$")
 THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
 SQL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
@@ -41,7 +41,7 @@ class GraphReadinessError(GraphPersistenceError):
 class GraphGatewayMode(StrEnum):
     DISABLED = "DISABLED"
     SHADOW = "SHADOW"
-    TARGET_E2E_CANDIDATE = "TARGET_E2E_CANDIDATE"
+    PRODUCTION = "PRODUCTION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +158,12 @@ class GraphFenceContext:
             self.binding_hash,
             self.code_build_id,
         )
-        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if self.execution_lane is GraphGatewayMode.PRODUCTION:
             if any(value is None for value in candidate_values):
                 raise GraphPersistenceConfigurationError(
                     "candidate fence requires complete activation and authority bindings"
                 )
-            if self.activation_id is None or TARGET_E2E_ACTIVATION_ID.fullmatch(
+            if self.activation_id is None or PRODUCTION_RUNTIME_ACTIVATION_ID.fullmatch(
                 self.activation_id
             ) is None:
                 raise GraphPersistenceConfigurationError("activation_id is invalid")
@@ -206,7 +206,7 @@ class GraphFenceContext:
         if self.result_hash is not None:
             require_sha256(self.result_hash, "result_hash")
             require_bounded_text(self.result_ref, "result_ref", 512)
-            if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if self.execution_lane is GraphGatewayMode.PRODUCTION:
                 require_sha256(self.proposal_hash, "proposal_hash")
                 require_sha256(self.result_envelope_hash, "result_envelope_hash")
         elif self.result_ref is not None:
@@ -262,7 +262,7 @@ class GraphReadinessConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.mode, GraphGatewayMode):
             raise GraphPersistenceConfigurationError(
-                "readiness mode must be DISABLED, SHADOW, or TARGET_E2E_CANDIDATE"
+                "readiness mode must be DISABLED, SHADOW, or PRODUCTION"
             )
         if self.mode is GraphGatewayMode.DISABLED:
             return

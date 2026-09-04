@@ -72,7 +72,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
 
     private static final String EVENT_REF_PREFIX = "urn:after-sale-flow:intake-event:";
     private static final String DEFAULT_GRAPH_KEY = "intake.v2";
-    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v2";
+    private static final String TARGET_GRAPH_KEY = "all-rooms.production-runtime.v2";
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -1125,8 +1125,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         Integer matches = jdbc.queryForObject(
                 """
                 select count(*)
-                  from target_e2e_room_epoch_binding target_binding
-                  join target_e2e_activation activation
+                  from production_runtime_room_epoch_binding target_binding
+                  join production_runtime_activation activation
                     on activation.activation_id = target_binding.activation_id
                    and activation.manifest_hash = target_binding.activation_manifest_hash
                    and activation.execution_lane = target_binding.execution_lane
@@ -1137,7 +1137,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                    and target_binding.room_type = 'INTAKE'
                    and target_binding.room_epoch = :roomEpoch
                    and target_binding.room_fencing_token = :fencingToken
-                   and activation.execution_lane = 'TARGET_E2E_CANDIDATE'
+                   and activation.execution_lane = 'PRODUCTION'
                    and activation.graph_key = :expectedGraphKey
                    and activation.lifecycle_status in ('ACTIVE', 'DRAIN_ONLY')
                 """,

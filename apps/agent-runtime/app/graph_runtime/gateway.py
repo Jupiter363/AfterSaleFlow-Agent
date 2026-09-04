@@ -73,11 +73,11 @@ from app.graph_runtime.registry import (
     PostgresGraphVersionRegistry,
     RegistryRecord,
 )
-from app.graph_runtime.target_e2e import (
-    PostgresTargetE2ERoomAuthorityRepository,
-    PostgresTargetE2ESyntheticCaseRepository,
-    TargetE2ERuntimeAuthority,
-    VerifiedTargetE2EInvocation,
+from app.graph_runtime.production_runtime import (
+    PostgresProductionRoomAuthorityRepository,
+    PostgresProductionSyntheticCaseRepository,
+    ProductionRuntimeAuthority,
+    VerifiedProductionInvocation,
 )
 from app.graph_runtime.transaction_boundary import run_postgres_transaction
 from app.security.invocation_envelope import (
@@ -108,9 +108,9 @@ _CONTROL_PLANE_RETRY_LIMIT: Final[int] = 2
 _CONTROL_PLANE_RETRY_INITIAL_SECONDS: Final[float] = 0.05
 _CONTROL_PLANE_RETRY_MAX_SECONDS: Final[float] = 0.2
 _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
-_TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v2"
-_TARGET_E2E_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v2"
-_TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
+_PRODUCTION_RUNTIME_GRAPH_KEY: Final[str] = "all-rooms.production-runtime.v2"
+_PRODUCTION_RUNTIME_ROOM_PROMPT_VERSION: Final[str] = "all-rooms-prompt.production-runtime.v2"
+_PRODUCTION_RUNTIME_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
 _PARALLEL_TECHNICAL_COMPLETION_SCHEMAS: Final[frozenset[str]] = frozenset(
     {
         "intake-parallel-technical-completion.v1",
@@ -180,7 +180,7 @@ class GatewayAdmission:
     record: CommandRecord
     action: AdmissionAction
     created: bool
-    candidate_authority: TargetE2ERuntimeAuthority | None = None
+    candidate_authority: ProductionRuntimeAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +326,7 @@ class GraphCommandGateway:
     ) -> None:
         if not isinstance(mode, GraphGatewayMode):
             raise GraphContractError(
-                "gateway mode must be DISABLED, SHADOW, or TARGET_E2E_CANDIDATE"
+                "gateway mode must be DISABLED, SHADOW, or PRODUCTION"
             )
         if acquire_timeout_seconds <= 0:
             raise GraphContractError("pool acquire timeout must be positive")
@@ -340,8 +340,8 @@ class GraphCommandGateway:
         self._registry = registry or PostgresGraphVersionRegistry()
         self._ledger = ledger or PostgresCommandLedger()
         self._leases = leases or PostgresLeaseRepository()
-        self._target_room_authority = PostgresTargetE2ERoomAuthorityRepository()
-        self._target_synthetic_cases = PostgresTargetE2ESyntheticCaseRepository()
+        self._target_room_authority = PostgresProductionRoomAuthorityRepository()
+        self._target_synthetic_cases = PostgresProductionSyntheticCaseRepository()
         self._recovery = PostgresRecoveryCoordinator(
             ledger=self._ledger,
             leases=self._leases,
@@ -391,17 +391,17 @@ class GraphCommandGateway:
                     activation_id=activation_id,
                     room_fencing_token=(
                         verified_invocation.room_fencing_token
-                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        if isinstance(verified_invocation, VerifiedProductionInvocation)
                         else None
                     ),
                     command_hash=(
                         verified_invocation.command_hash
-                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        if isinstance(verified_invocation, VerifiedProductionInvocation)
                         else None
                     ),
                     command_envelope_hash=(
                         verified_invocation.command_envelope_hash
-                        if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                        if isinstance(verified_invocation, VerifiedProductionInvocation)
                         else None
                     ),
                 )
@@ -412,8 +412,8 @@ class GraphCommandGateway:
                     execution_lane=execution_lane,
                 )
                 if candidate_authority is not None:
-                    if not isinstance(verified_invocation, VerifiedTargetE2EInvocation):
-                        raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+                    if not isinstance(verified_invocation, VerifiedProductionInvocation):
+                        raise GraphThreadBindingError("PRODUCTION_RUNTIME_CREDENTIAL_REQUIRED")
                     await self._target_room_authority.advance(
                         connection,
                         authority=candidate_authority,
@@ -1674,17 +1674,17 @@ class GraphCommandGateway:
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedTargetE2EInvocation,
+        verified_invocation: VerifiedProductionInvocation,
         expected_thread: ThreadIdentity,
     ) -> ResultRecord:
         """Reconcile one already-admitted candidate command to its exact result envelope."""
 
         self._require_shadow()
-        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+        if self._mode is not GraphGatewayMode.PRODUCTION:
             raise GraphGatewayDisabledError()
         lane, activation_id, authority = self._require_invocation_lane(verified_invocation)
         if authority is None:
-            raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+            raise GraphThreadBindingError("PRODUCTION_RUNTIME_CREDENTIAL_REQUIRED")
         self._require_invocation_binding(command, verified_invocation)
         self._require_command_thread(command, expected_thread)
         async def candidate_reconcile_transaction(connection: Any) -> ResultRecord:
@@ -2519,13 +2519,13 @@ class GraphCommandGateway:
             command.room_type != "INTAKE"
             or command.room_id is None
             or command.event_ref is None
-            or command.actor_scope.actor_role not in _TARGET_E2E_INTAKE_ROLES
+            or command.actor_scope.actor_role not in _PRODUCTION_RUNTIME_INTAKE_ROLES
             or command.actor_scope.audience != command.actor_scope.actor_role
             or invocation.agent_profile_id != PARALLEL_INTAKE_AGENT_PROFILE_ID
             or invocation.output_schema_version != PARALLEL_INTAKE_OUTPUT_SCHEMA
             or not 3 <= command.retry_budget.provider_attempts_remaining <= 6
             or admission.binding.execution_lane
-            is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            is not GraphGatewayMode.PRODUCTION
         ):
             raise GraphContractError(
                 "technical completion is reserved for parallel Intake ROOM_MESSAGE"
@@ -3013,14 +3013,14 @@ class GraphCommandGateway:
     def _require_invocation_lane(
         self,
         invocation: VerifiedInvocation,
-    ) -> tuple[GraphGatewayMode, str | None, TargetE2ERuntimeAuthority | None]:
+    ) -> tuple[GraphGatewayMode, str | None, ProductionRuntimeAuthority | None]:
         if self._mode is GraphGatewayMode.SHADOW:
-            if isinstance(invocation, VerifiedTargetE2EInvocation):
+            if isinstance(invocation, VerifiedProductionInvocation):
                 raise GraphThreadBindingError("SHADOW_CANDIDATE_CREDENTIAL_REJECTED")
             return GraphGatewayMode.SHADOW, None, None
-        if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            if not isinstance(invocation, VerifiedTargetE2EInvocation):
-                raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+        if self._mode is GraphGatewayMode.PRODUCTION:
+            if not isinstance(invocation, VerifiedProductionInvocation):
+                raise GraphThreadBindingError("PRODUCTION_RUNTIME_CREDENTIAL_REQUIRED")
             return self._mode, invocation.authority.activation_id, invocation.authority
         raise GraphGatewayDisabledError()
 
@@ -3115,15 +3115,15 @@ class GraphCommandGateway:
         role = command.actor_scope.actor_role
         audience = command.actor_scope.audience
         is_target_intake_candidate = (
-            execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
-            and command.graph_key == _TARGET_E2E_GRAPH_KEY
-            and binding.graph_key == _TARGET_E2E_GRAPH_KEY
+            execution_lane is GraphGatewayMode.PRODUCTION
+            and command.graph_key == _PRODUCTION_RUNTIME_GRAPH_KEY
+            and binding.graph_key == _PRODUCTION_RUNTIME_GRAPH_KEY
             and command.room_type == "INTAKE"
         )
         if is_target_intake_candidate:
             if (
-                binding.prompt_version == _TARGET_E2E_ROOM_PROMPT_VERSION
-                and role in _TARGET_E2E_INTAKE_ROLES
+                binding.prompt_version == _PRODUCTION_RUNTIME_ROOM_PROMPT_VERSION
+                and role in _PRODUCTION_RUNTIME_INTAKE_ROLES
                 and audience == role
                 and actual_profile
                 == replace(

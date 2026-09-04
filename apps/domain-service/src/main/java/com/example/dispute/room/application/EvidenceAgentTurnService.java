@@ -38,7 +38,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnResultV2;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceTurnResultV2;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;

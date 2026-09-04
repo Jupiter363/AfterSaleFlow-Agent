@@ -1,8 +1,9 @@
 # 生产仓库瘦身记录（2026-09-04）
 
-本次整理以 `main` 的完整快照 `f5cb06864272a10da8c893feec036265322242e5`
-为恢复点，并已将该快照推送到分支
-`codex/main-full-backup-20260904-f5cb0686`。
+本次生产运行时重构以 `main` 的完整快照
+`265667ac9224d69a040bfa3324343f2b27cd4f67` 为恢复点，并已将该快照推送到分支
+`codex/main-pre-production-runtime-refactor-20260904`。更早的瘦身快照仍保留在
+`codex/main-full-backup-20260904-f5cb0686`，但不再作为本轮首选恢复点。
 
 ## 从生产分支移除
 
@@ -15,7 +16,7 @@
 
 - Java、Python、OCR、前端运行时代码及当前自动化测试。
 - 所有 Flyway/Graph migration、跨服务 schema、replay fixture 与兼容性合同。
-- 当前 V4 并行 Graph、Temporal 工作流、Target E2E、部署、恢复和可观测性资产。
+- 当前 V4 并行 Graph、Temporal 工作流、Production Runtime、部署、恢复和可观测性资产。
 - 当前架构图 `docs/assets/architecture/AfterSaleFlow-Agent-architecture.png`，图片内容未修改。
 
 ## 文本同步基线

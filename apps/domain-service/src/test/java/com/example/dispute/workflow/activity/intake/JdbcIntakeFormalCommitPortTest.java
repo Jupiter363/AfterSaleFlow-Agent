@@ -365,7 +365,7 @@ class JdbcIntakeFormalCommitPortTest {
     @Test
     void authorityParametersUseExecutionOutputSchemaWhenProposalAndExecutionSchemasDiffer() {
         Fixture fixture = fixture("PREFLIGHT_EXECUTION_SCHEMA_" + SEQUENCE.incrementAndGet());
-        String executionSchema = "target-e2e-room-proposal-source.v1";
+        String executionSchema = "production-runtime-room-proposal-source.v1";
         IntakeGraphFinalizationRequest request = requestWithExecutionOutputSchema(fixture, executionSchema);
 
         MapSqlParameterSource parameters = authorityParameters(request);

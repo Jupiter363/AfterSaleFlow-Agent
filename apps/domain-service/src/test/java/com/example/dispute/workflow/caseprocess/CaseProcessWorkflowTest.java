@@ -68,9 +68,9 @@ import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressRecei
 import com.example.dispute.workflow.temporal.room.common.RoomControlSnapshot;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessWorkflow;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomCaseProcessWorkflow;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -78,7 +78,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommit;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommitResult;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.client.UpdateOptions;
@@ -2926,7 +2926,7 @@ class CaseProcessWorkflowTest {
         0,
         new ActorRef("user-case-process", ActorRole.USER, List.of("evidence:opening")),
         new PayloadRef(
-            "target-e2e-evidence-opening.v1",
+            "production-runtime-evidence-opening.v1",
             "urn:test:evidence-opening:" + sequence,
             hash,
             32),

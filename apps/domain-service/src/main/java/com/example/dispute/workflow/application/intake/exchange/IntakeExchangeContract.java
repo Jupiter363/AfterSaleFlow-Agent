@@ -22,7 +22,7 @@ public final class IntakeExchangeContract {
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern THREAD_ID = Pattern.compile("grt\\.v1\\.[0-9a-f]{32}");
     private static final Set<String> EXCHANGE_GRAPH_KEYS =
-            Set.of("intake.v2", "all-rooms.target-e2e.v2");
+            Set.of("intake.v2", "all-rooms.production-runtime.v2");
 
     private IntakeExchangeContract() {}
 

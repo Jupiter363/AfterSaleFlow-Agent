@@ -34,8 +34,8 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -330,8 +330,8 @@ public class EvidenceSubmissionService {
                         dispute.getId(), message.roomId(), fact, batch.getId(), actor.actorId());
         PayloadRef payload =
                 canonicalPayload(
-                        "target-e2e-evidence-submission.v1",
-                        "urn:target-e2e:timeline-event:" + event.getId(),
+                        "production-runtime-evidence-submission.v1",
+                        "urn:production-runtime:timeline-event:" + event.getId(),
                         fact);
         AcceptCaseCommand command = new AcceptCaseCommand(
                 CommandType.EVIDENCE_SUBMIT,

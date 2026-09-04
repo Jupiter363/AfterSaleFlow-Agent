@@ -12,8 +12,8 @@ import com.example.dispute.workflow.config.OrchestrationCutoverProperties;
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -145,11 +145,11 @@ class ConfiguredRoomEpochSelectorTest {
             assertThat(selection.roomWorkflowType())
                     .isEqualTo(TargetTypedRoomProtocol.workflowType(roomType));
             assertThat(selection.roomWorkflowBuildId()).isEqualTo("p9-control-build");
-            assertThat(selection.graphKey()).isEqualTo("all-rooms.target-e2e.v1");
+            assertThat(selection.graphKey()).isEqualTo("all-rooms.production-runtime.v1");
             assertThat(selection.graphVersion())
                     .isEqualTo(TargetTypedRoomProtocol.GRAPH_VERSION);
             assertThat(selection.checkpointSchemaVersion())
-                    .isEqualTo("target-e2e-checkpoint.v1");
+                    .isEqualTo("production-runtime-checkpoint.v1");
             assertThat(selection.targetActivationBinding().activationId())
                     .isEqualTo("p9act.v1.0123456789abcdef0123456789abcdef");
         }
@@ -269,9 +269,9 @@ class ConfiguredRoomEpochSelectorTest {
                 "p9-case-build",
                 TargetTypedRoomProtocol.workflowType(request.roomType()),
                 "p9-control-build",
-                "all-rooms.target-e2e.v1",
+                "all-rooms.production-runtime.v1",
                 TargetTypedRoomProtocol.GRAPH_VERSION,
-                "target-e2e-checkpoint.v1",
+                "production-runtime-checkpoint.v1",
                 "agent-stream.v2");
     }
 

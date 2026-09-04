@@ -31,7 +31,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommit;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetEvidenceTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
-import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ClosedRoomTuple;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ExpiredTargetEvidenceTerminalRecoveryCommitment;
@@ -58,8 +58,8 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.activity.ActivityCancellationType;
 import io.temporal.api.common.v1.WorkflowExecution;
@@ -134,7 +134,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
     private static final String AUTHORITY_BRIDGE_CHANGE_ID = "typed-intake-bridge-authority-v1";
     private static final String TARGET_TYPED_ROOM_CHANGE_ID =
-        "target-e2e-typed-room-child-v1";
+        "production-runtime-typed-room-child-v1";
     private static final String TARGET_ROOM_PROGRESS_HANDLE_REBIND_CHANGE_ID =
         "case-process-target-room-progress-handle-rebind-v1";
     private static final String CHILD_COMPENSATION_INVARIANT_CHANGE_ID =
@@ -1755,7 +1755,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
 
     /**
-     * Completes target-only work after CompleteCaseCommandRouting has committed. This ordering keeps
+     * Completes production-only work after CompleteCaseCommandRouting has committed. This ordering keeps
      * Review receipt acceptance separate from the Activity that mutates the terminal DB revision.
      */
     private void completeTargetChildAfterDurableRouting(CaseCommandRef command) {
@@ -2053,7 +2053,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
     /**
      * provisioning 的实际 child 启动点。根据已验证的 {@code ActiveChildKind} 分派到 legacy Room
-     * Control、typed Intake 或 target-only dispatcher；调用者在此之后才把 child execution 写入
+     * Control、typed Intake 或 production-only dispatcher；调用者在此之后才把 child execution 写入
      * {@link ProvisioningCommitment}，从而区分“已启动”与“已提交绑定”。
      */
     private StartedChild startProvisionedChild(
@@ -2069,7 +2069,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                 || child.execution().getRunId().isBlank()) {
                 throw protocolFailure(
                     "TARGET_TYPED_ROOM_DISPATCHER_UNAVAILABLE",
-                    "target typed room start requires a target-only dispatcher");
+                    "target typed room start requires a production-only dispatcher");
             }
             return new StartedChild(
                 null,
@@ -2190,7 +2190,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
 
     /**
-     * Target-only workflow implementations override this hook in an isolated source set. The
+     * Production-only workflow implementations override this hook in an isolated source set. The
      * default artifact never acquires dynamic child-start capability.
      */
     protected TargetTypedRoomChildHandle startTargetTypedRoomChild(
@@ -2201,7 +2201,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
 
     /**
-     * Restores the target-only handle after Continue-As-New without changing child identity.
+     * Restores the production-only handle after Continue-As-New without changing child identity.
      */
     protected TargetTypedRoomChildHandle restoreTargetTypedRoomChild(
         ActiveChildDescriptor descriptor) {
@@ -2431,7 +2431,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         String initiatorActorScopeHash,
         String respondentActorScopeHash,
         Binding reviewOutcomeStartBinding,
-        com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
+        com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
             evidenceParticipantBinding) {
         if (kind == ActiveChildKind.TARGET_TYPED_ROOM) {
             return new ActiveChildDescriptor(
@@ -4900,7 +4900,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
 
     /**
-     * Target-only child adapter surface; implementations must remain deterministic Workflow code.
+     * Production-only child adapter surface; implementations must remain deterministic Workflow code.
      */
     protected interface TargetTypedRoomChildHandle {
 
@@ -4959,7 +4959,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             return null;
         }
 
-        default com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
+        default com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
         evidenceParticipantBinding() {
             return null;
         }
@@ -4968,7 +4968,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
 
     /**
-     * Exact fenced revisions returned by the target-only typed-room dispatcher.
+     * Exact fenced revisions returned by the production-only typed-room dispatcher.
      */
     protected record TargetTypedRoomDispatchReceipt(
         RoomType roomType,

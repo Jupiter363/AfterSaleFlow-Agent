@@ -705,7 +705,7 @@ async def test_v4_agent_context_reaches_governed_harness_invocation() -> None:
             "scope_type": "ROOM_SHARED",
             "allowed_actor_ids": ["ACTOR_SYSTEM"],
             "allowed_actor_roles": ["SYSTEM"],
-            "prompt_profile_id": "all-rooms-prompt.target-e2e.v2",
+            "prompt_profile_id": "all-rooms-prompt.production-runtime.v2",
             "memory_policy_id": "MEMEO_DEFAULT",
             "model_profile_id": "hearing.model-profile.v4",
             "output_schema_version": "hearing.intake-proposal.v4",

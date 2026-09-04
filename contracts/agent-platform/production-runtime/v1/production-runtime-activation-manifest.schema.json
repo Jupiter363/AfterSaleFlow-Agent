@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/production-runtime/v1/production-runtime-activation-manifest.schema.json",
+  "title": "Production Runtime Activation Manifest v1",
+  "description": "A short-lived Java-signed capability for one isolated target-architecture E2E candidate. It is not a production promotion or migration receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "manifestHash",
+    "preimage": "omit_top_level_fields",
+    "omitFields": ["manifestHash"]
+  },
+  "x-signature": {
+    "algorithm": "ES256",
+    "covers": "FULL_RFC_8785_CANONICAL_MANIFEST_PAYLOAD",
+    "transport": "COMPACT_JWS",
+    "protectedHeaderTyp": "production-runtime-activation+jwt",
+    "signer": "JAVA_CONTROL_PLANE"
+  },
+  "x-semantic-policy": "activation-validation-policy.v1.json",
+  "required": [
+    "contractVersion",
+    "activationId",
+    "manifestHash",
+    "executionLane",
+    "environmentId",
+    "environmentGeneration",
+    "candidateSha",
+    "issuedAt",
+    "expiresAt",
+    "nonce",
+    "tenantSurrogate",
+    "caseScope",
+    "allowedRoomTypes",
+    "buildBindings",
+    "graphBinding",
+    "imageDigests",
+    "temporalNamespace",
+    "databaseIdentities",
+    "authority",
+    "productionDefaults"
+  ],
+  "properties": {
+    "contractVersion": {"const": "production-runtime-activation.v1"},
+    "activationId": {"$ref": "#/$defs/activationId"},
+    "manifestHash": {"$ref": "#/$defs/sha256"},
+    "executionLane": {"const": "PRODUCTION"},
+    "environmentId": {"$ref": "#/$defs/identifier"},
+    "environmentGeneration": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "candidateSha": {"$ref": "#/$defs/gitSha"},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "nonce": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$"
+    },
+    "tenantSurrogate": {"$ref": "#/$defs/identifier"},
+    "caseScope": {
+      "oneOf": [
+        {"$ref": "#/$defs/caseAllowlistScope"},
+        {"$ref": "#/$defs/signedSyntheticNewCaseScope"}
+      ]
+    },
+    "allowedRoomTypes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {"enum": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]}
+    },
+    "buildBindings": {"$ref": "#/$defs/buildBindings"},
+    "graphBinding": {"$ref": "#/$defs/graphBinding"},
+    "imageDigests": {"$ref": "#/$defs/imageDigests"},
+    "temporalNamespace": {"$ref": "#/$defs/identifier"},
+    "databaseIdentities": {"$ref": "#/$defs/databaseIdentities"},
+    "authority": {"$ref": "#/$defs/authority"},
+    "productionDefaults": {"$ref": "#/$defs/productionDefaults"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "activationId": {"type": "string", "pattern": "^p9act\\.v1\\.[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "caseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "caseAllowlistScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "allowedCaseIds"],
+      "properties": {
+        "mode": {"const": "EXPLICIT_CASE_IDS"},
+        "allowedCaseIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/caseId"}
+        }
+      }
+    },
+    "signedSyntheticNewCaseScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "caseIdPrefix",
+        "maxCases",
+        "fixtureSetId",
+        "fixtureSetHash",
+        "containsRealCaseOrPartyData",
+        "externalEffectsAllowed"
+      ],
+      "properties": {
+        "mode": {"const": "ISOLATED_SYNTHETIC_NEW_CASES"},
+        "caseIdPrefix": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[A-Z][A-Z0-9_]{2,31}$"
+        },
+        "maxCases": {"type": "integer", "minimum": 1, "maximum": 16},
+        "fixtureSetId": {"$ref": "#/$defs/identifier"},
+        "fixtureSetHash": {"$ref": "#/$defs/sha256"},
+        "containsRealCaseOrPartyData": {"const": false},
+        "externalEffectsAllowed": {"const": false}
+      }
+    },
+    "buildBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseBuildId", "controlBuildId", "agentBuildId"],
+      "properties": {
+        "caseBuildId": {"$ref": "#/$defs/identifier"},
+        "controlBuildId": {"$ref": "#/$defs/identifier"},
+        "agentBuildId": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "graphBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "version", "checkpointSchemaVersion", "bindingHash", "codeBuildId"],
+      "properties": {
+        "key": {"const": "all-rooms.production-runtime.v2"},
+        "version": {"$ref": "#/$defs/identifier"},
+        "checkpointSchemaVersion": {"$ref": "#/$defs/identifier"},
+        "bindingHash": {"$ref": "#/$defs/sha256"},
+        "codeBuildId": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "imageDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["javaApi", "temporalControlWorker", "temporalAgentWorker", "pythonAgent", "frontend"],
+      "properties": {
+        "javaApi": {"$ref": "#/$defs/imageDigest"},
+        "temporalControlWorker": {"$ref": "#/$defs/imageDigest"},
+        "temporalAgentWorker": {"$ref": "#/$defs/imageDigest"},
+        "pythonAgent": {"$ref": "#/$defs/imageDigest"},
+        "frontend": {"$ref": "#/$defs/imageDigest"}
+      }
+    },
+    "databaseIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clusterIdentity", "databaseIdentity", "runtimePrincipalIdentity"],
+      "properties": {
+        "clusterIdentity": {"$ref": "#/$defs/identifier"},
+        "databaseIdentity": {"$ref": "#/$defs/identifier"},
+        "runtimePrincipalIdentity": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "databaseIdentities": {
+      "type": "object",
+      "additionalProperties": false,
+      "x-semantic-constraints": [
+        "domain.clusterIdentity MUST_NOT_EQUAL graph.clusterIdentity",
+        "domain.databaseIdentity MUST_NOT_EQUAL graph.databaseIdentity",
+        "Different runtimePrincipalIdentity values do not prove physical isolation"
+      ],
+      "required": ["domain", "graph"],
+      "properties": {
+        "domain": {"$ref": "#/$defs/databaseIdentity"},
+        "graph": {"$ref": "#/$defs/databaseIdentity"}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environmentClass",
+        "graphOutputAuthority",
+        "graphDomainCredentialsPresent",
+        "graphDomainWriteAllowed",
+        "formalWriter",
+        "javaDomainCommitAllowed",
+        "externalEffectsAllowed",
+        "productionTrafficAllowed",
+        "productionPromotionAuthority",
+        "migrationPromotionAuthority"
+      ],
+      "properties": {
+        "environmentClass": {"const": "ISOLATED_PREPRODUCTION"},
+        "graphOutputAuthority": {"const": "PROPOSAL_ONLY"},
+        "graphDomainCredentialsPresent": {"const": false},
+        "graphDomainWriteAllowed": {"const": false},
+        "formalWriter": {"const": "JAVA_FINALIZER_ONLY"},
+        "javaDomainCommitAllowed": {"const": true},
+        "externalEffectsAllowed": {"const": false},
+        "productionTrafficAllowed": {"const": false},
+        "productionPromotionAuthority": {"const": false},
+        "migrationPromotionAuthority": {"const": false}
+      }
+    },
+    "productionDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formalCaseSelector", "productionActivation"],
+      "properties": {
+        "formalCaseSelector": {"const": "LEGACY"},
+        "productionActivation": {"const": "DISABLED"}
+      }
+    }
+  }
+}

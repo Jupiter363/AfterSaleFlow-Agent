@@ -27,7 +27,7 @@ public record IntakeTargetAgentRunContext(
     ExecuteAgentRunRequest request,
     IntakeParallelTurnContext parallelTurnContext) {
 
-  public static final String TARGET_LANE = "TARGET_E2E_CANDIDATE";
+  public static final String TARGET_LANE = "PRODUCTION";
   public static final String INITIAL_SCHEMA_VERSION = "intake-target-agent-run-context.v1";
   public static final String RETRY_SCHEMA_VERSION = "intake-target-agent-run-context.v2";
 
@@ -73,10 +73,10 @@ public record IntakeTargetAgentRunContext(
           "schemaVersion must be intake-target-agent-run-context.v1 or v2");
     }
     if (!TARGET_LANE.equals(executionLane)) {
-      throw new IllegalArgumentException("executionLane must be TARGET_E2E_CANDIDATE");
+      throw new IllegalArgumentException("executionLane must be PRODUCTION");
     }
     if (activationId == null || !activationId.matches("p9act\\.v1\\.[0-9a-f]{32}")) {
-      throw new IllegalArgumentException("activationId must be a target-E2E activation id");
+      throw new IllegalArgumentException("activationId must be a production-runtime activation id");
     }
     requireHash(activationManifestHash, "activationManifestHash");
     if (roomFencingToken < 1 || expectedProcessRevision < 0 || expectedRoomRevision < 0) {

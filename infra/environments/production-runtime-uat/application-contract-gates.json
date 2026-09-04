@@ -1,0 +1,41 @@
+{
+  "schema_version": "production-runtime-application-contract-gates.v1",
+  "gates": [
+    {
+      "id": "python-candidate-runtime-mode",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "merged Python image exposes the target candidate runtime rather than the current SHADOW-only gateway"
+    },
+    {
+      "id": "isolated-real-model-runtime",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "a digest-locked local model service replaces the deliberately unresolvable model-contract-blocker endpoint"
+    },
+    {
+      "id": "intake-temporal-allocation",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "INTAKE allocation=TEMPORAL and protocol=V3/TEMPORAL_ACTIVITY on candidate lane"
+    },
+    {
+      "id": "short-lived-activation-consumption",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "activation receipt binds the generated registry hash and consumption timestamp"
+    },
+    {
+      "id": "all-room-target-provenance",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "INTAKE,EVIDENCE,HEARING,REVIEW each expose Temporal, Graph, and Java final receipts"
+    },
+    {
+      "id": "complete-zero-legacy-inventory",
+      "required": true,
+      "status": "BLOCKING_UNTIL_RUNTIME_PROVES",
+      "proof": "complete AgentRun inventory reports zero LEGACY runs"
+    }
+  ]
+}

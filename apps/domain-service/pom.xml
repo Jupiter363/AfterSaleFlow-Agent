@@ -24,10 +24,10 @@
 
     <properties>
         <java.version>21</java.version>
-        <target-e2e.classifier>target-e2e</target-e2e.classifier>
-        <target-e2e.classes-directory>${project.build.directory}/target-e2e-classes</target-e2e.classes-directory>
-        <target-e2e.source-sha>UNBOUND</target-e2e.source-sha>
-        <target-e2e.skip-unit-tests>false</target-e2e.skip-unit-tests>
+        <production-runtime.classifier>production-runtime</production-runtime.classifier>
+        <production-runtime.classes-directory>${project.build.directory}/production-runtime-classes</production-runtime.classes-directory>
+        <production-runtime.source-sha>UNBOUND</production-runtime.source-sha>
+        <production-runtime.skip-unit-tests>false</production-runtime.skip-unit-tests>
         <springdoc.version>2.8.11</springdoc.version>
         <temporal.version>1.35.0</temporal.version>
         <archunit.version>1.4.1</archunit.version>
@@ -183,7 +183,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <skipTests>${target-e2e.skip-unit-tests}</skipTests>
+                    <skipTests>${production-runtime.skip-unit-tests}</skipTests>
                     <useModulePath>false</useModulePath>
                     <excludes>
                         <exclude>**/*IntegrationTest.java</exclude>
@@ -200,7 +200,7 @@
 
     <profiles>
         <profile>
-            <id>target-e2e</id>
+            <id>production-runtime</id>
             <build>
                 <plugins>
                     <plugin>
@@ -208,25 +208,25 @@
                         <artifactId>maven-antrun-plugin</artifactId>
                         <executions>
                             <execution>
-                                <id>prepare-target-e2e-classes</id>
+                                <id>prepare-production-runtime-classes</id>
                                 <phase>prepare-package</phase>
                                 <goals>
                                     <goal>run</goal>
                                 </goals>
                                 <configuration>
                                     <target>
-                                        <fail message="target-e2e.source-sha must be an exact Git commit SHA">
+                                        <fail message="production-runtime.source-sha must be an exact Git commit SHA">
                                             <condition>
                                                 <not>
-                                                    <matches string="${target-e2e.source-sha}" pattern="^[0-9a-f]{40}$"/>
+                                                    <matches string="${production-runtime.source-sha}" pattern="^[0-9a-f]{40}$"/>
                                                 </not>
                                             </condition>
                                         </fail>
-                                        <delete dir="${target-e2e.classes-directory}"/>
-                                        <mkdir dir="${target-e2e.classes-directory}"/>
-                                        <mkdir dir="${target-e2e.classes-directory}/META-INF/after-sale-flow"/>
-                                        <echo file="${target-e2e.classes-directory}/META-INF/after-sale-flow/compiled-source.sha"
-                                              encoding="UTF-8">${target-e2e.source-sha}</echo>
+                                        <delete dir="${production-runtime.classes-directory}"/>
+                                        <mkdir dir="${production-runtime.classes-directory}"/>
+                                        <mkdir dir="${production-runtime.classes-directory}/META-INF/after-sale-flow"/>
+                                        <echo file="${production-runtime.classes-directory}/META-INF/after-sale-flow/compiled-source.sha"
+                                              encoding="UTF-8">${production-runtime.source-sha}</echo>
                                     </target>
                                 </configuration>
                             </execution>
@@ -237,13 +237,13 @@
                         <artifactId>maven-resources-plugin</artifactId>
                         <executions>
                             <execution>
-                                <id>copy-main-classes-for-target-e2e</id>
+                                <id>copy-main-classes-for-production-runtime</id>
                                 <phase>prepare-package</phase>
                                 <goals>
                                     <goal>copy-resources</goal>
                                 </goals>
                                 <configuration>
-                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                    <outputDirectory>${production-runtime.classes-directory}</outputDirectory>
                                     <resources>
                                         <resource>
                                             <directory>${project.build.outputDirectory}</directory>
@@ -253,16 +253,16 @@
                                 </configuration>
                             </execution>
                             <execution>
-                                <id>copy-target-e2e-resources</id>
+                                <id>copy-production-runtime-resources</id>
                                 <phase>prepare-package</phase>
                                 <goals>
                                     <goal>copy-resources</goal>
                                 </goals>
                                 <configuration>
-                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                    <outputDirectory>${production-runtime.classes-directory}</outputDirectory>
                                     <resources>
                                         <resource>
-                                            <directory>${project.basedir}/src/target-e2e/resources</directory>
+                                            <directory>${project.basedir}/src/production-runtime/resources</directory>
                                             <filtering>false</filtering>
                                         </resource>
                                     </resources>
@@ -275,16 +275,16 @@
                         <artifactId>maven-compiler-plugin</artifactId>
                         <executions>
                             <execution>
-                                <id>compile-target-e2e-classes</id>
+                                <id>compile-production-runtime-classes</id>
                                 <phase>prepare-package</phase>
                                 <goals>
                                     <goal>compile</goal>
                                 </goals>
                                 <configuration>
                                     <compileSourceRoots>
-                                        <compileSourceRoot>${project.basedir}/src/target-e2e/java</compileSourceRoot>
+                                        <compileSourceRoot>${project.basedir}/src/production-runtime/java</compileSourceRoot>
                                     </compileSourceRoots>
-                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                    <outputDirectory>${production-runtime.classes-directory}</outputDirectory>
                                 </configuration>
                             </execution>
                         </executions>
@@ -294,14 +294,14 @@
                         <artifactId>maven-jar-plugin</artifactId>
                         <executions>
                             <execution>
-                                <id>package-target-e2e-classes</id>
+                                <id>package-production-runtime-classes</id>
                                 <phase>package</phase>
                                 <goals>
                                     <goal>jar</goal>
                                 </goals>
                                 <configuration>
-                                    <classesDirectory>${target-e2e.classes-directory}</classesDirectory>
-                                    <classifier>${target-e2e.classifier}</classifier>
+                                    <classesDirectory>${production-runtime.classes-directory}</classesDirectory>
+                                    <classifier>${production-runtime.classifier}</classifier>
                                 </configuration>
                             </execution>
                         </executions>
@@ -311,12 +311,12 @@
                         <artifactId>spring-boot-maven-plugin</artifactId>
                         <executions>
                             <execution>
-                                <id>repackage-target-e2e</id>
+                                <id>repackage-production-runtime</id>
                                 <goals>
                                     <goal>repackage</goal>
                                 </goals>
                                 <configuration>
-                                    <classifier>${target-e2e.classifier}</classifier>
+                                    <classifier>${production-runtime.classifier}</classifier>
                                     <mainClass>com.example.dispute.DisputeApplication</mainClass>
                                 </configuration>
                             </execution>
@@ -327,12 +327,12 @@
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration>
                             <includes>
-                                <include>**/TargetE2eArtifactIsolationIT.java</include>
+                                <include>**/ProductionArtifactIsolationIT.java</include>
                             </includes>
                             <systemPropertyVariables>
-                                <targetE2e.buildDirectory>${project.build.directory}</targetE2e.buildDirectory>
-                                <targetE2e.finalName>${project.build.finalName}</targetE2e.finalName>
-                                <targetE2e.classifier>${target-e2e.classifier}</targetE2e.classifier>
+                                <production.buildDirectory>${project.build.directory}</production.buildDirectory>
+                                <production.finalName>${project.build.finalName}</production.finalName>
+                                <production.classifier>${production-runtime.classifier}</production.classifier>
                             </systemPropertyVariables>
                         </configuration>
                     </plugin>

@@ -94,7 +94,7 @@ from app.graph_runtime.production_bindings import (
     _initial_state,
     _project_synthetic_result,
     _terminal_plan,
-    _target_e2e_executor_registration,
+    _production_runtime_executor_registration,
     _validate_synthetic_state,
     _executor_registration,
     build_graph_runtime_bindings,
@@ -321,28 +321,28 @@ def _target_settings() -> Settings:
         **BASE_SETTINGS,
         litellm_base_url="http://model-runtime:4000",
         litellm_model="qwen3.7-plus-target",
-        graph_gateway_mode="TARGET_E2E_CANDIDATE",
+        graph_gateway_mode="PRODUCTION",
         graph_database_dsn=("postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"),
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
         graph_expected_environment_generation="7",
         graph_expected_restore_verification_hash="a" * 64,
-        graph_target_e2e_isolated=True,
-        target_e2e_activation_manifest_hash=activation_manifest_hash,
-        graph_target_e2e_bindings=[
+        graph_production_runtime_isolated=True,
+        production_runtime_activation_manifest_hash=activation_manifest_hash,
+        graph_production_runtime_bindings=[
             {
-                "graph_key": "all-rooms.target-e2e.v1",
-                "graph_version": "target-e2e-graph.2026-07-27.1",
-                "checkpoint_schema_version": "target-e2e-checkpoint.v1",
-                "state_schema_version": "target-e2e-room-state.v1",
+                "graph_key": "all-rooms.production-runtime.v2",
+                "graph_version": "production-runtime-graph.2026-08-18.3",
+                "checkpoint_schema_version": "production-runtime-checkpoint.v2",
+                "state_schema_version": "production-runtime-room-state.v1",
                 "state_schema_hash": "b" * 64,
                 "command_schema_version": "room-graph-command.v1",
                 "result_schema_version": "room-graph-result.v1",
-                "agent_profile_id": "all-rooms-agent.target-e2e.v1",
-                "prompt_version": "all-rooms-prompt.target-e2e.v1",
-                "model_profile_id": "qwen3.7-plus.structured.v1",
-                "output_schema_version": "target-e2e-room-proposal-source.v1",
-                "policy_version": "all-rooms-policy.target-e2e.v1",
-                "guardrail_version": "all-rooms-guardrail.target-e2e.v1",
+                "agent_profile_id": "all-rooms-agent.production-runtime.v1",
+                "prompt_version": "all-rooms-prompt.production-runtime.v2",
+                "model_profile_id": "production-runtime.contract-blocked",
+                "output_schema_version": "production-runtime-room-proposal-source.v2",
+                "policy_version": "all-rooms-policy.production-runtime.v1",
+                "guardrail_version": "all-rooms-guardrail.production-runtime.v1",
                 "tool_policy_version": "tools.none.v1",
                 "binding_hash": "c" * 64,
                 "code_build_id": "candidate-build-1",
@@ -350,12 +350,12 @@ def _target_settings() -> Settings:
                 "allowed_stage_codes": ["INTAKE_MESSAGE"],
             }
         ],
-        graph_target_e2e_runtime_context={
-            "schemaVersion": "graph-target-e2e-runtime-context.v1",
-            "executionLane": "TARGET_E2E_CANDIDATE",
+        graph_production_runtime_context={
+            "schemaVersion": "production-runtime-context.v1",
+            "executionLane": "PRODUCTION",
             "activationId": f"p9act.v1.{'1' * 32}",
             "activationManifestHash": activation_manifest_hash,
-            "environmentId": "target-e2e-local",
+            "environmentId": "production-runtime-local",
             "environmentGeneration": 7,
             "candidateSha": "d" * 40,
             "issuedAt": "2026-07-27T10:00:00Z",
@@ -367,8 +367,8 @@ def _target_settings() -> Settings:
                 "allowedCaseIds": ["case-p9-001"],
             },
             "allowedRoomTypes": ["INTAKE"],
-            "composeProject": "p9_target_e2e",
-            "temporalNamespace": "target-e2e-p9",
+            "composeProject": "p9_production_runtime",
+            "temporalNamespace": "production-runtime-p9",
             "buildBindings": {
                 "caseBuildId": "case-build-1",
                 "controlBuildId": "control-build-1",
@@ -737,7 +737,7 @@ def _target_candidate_intake_execution(command: RoomGraphCommand) -> GatewayExec
         execution,
         fence=replace(
             execution.fence,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=f"p9act.v1.{'a' * 32}",
             room_fencing_token=1,
             command_hash="b" * 64,
@@ -1183,11 +1183,11 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
         admission_gate=cast(Any, endpoint_gate),
         execution_verifier=cast(Any, object()),
         reconciliation_verifier=cast(Any, object()),
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         intake_infrastructure_preparer=prepare_endpoint_infrastructure,
     )
     handle = GraphRuntimeHandle(settings=_settings())
-    handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+    handle._mode = GraphGatewayMode.PRODUCTION
     handle._runtime = cast(Any, endpoint_runtime)
     app = FastAPI()
     app.include_router(create_graph_readiness_router(handle))
@@ -1221,7 +1221,7 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
         wrong_mode = await api_client.post("/ready/intake-preparation")
         assert wrong_mode.status_code == 503
         assert len(preparation_requests) == 5
-        handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+        handle._mode = GraphGatewayMode.PRODUCTION
         endpoint_runtime._intake_infrastructure_preparer = None
         no_default_provider = await api_client.post("/ready/intake-preparation")
         assert no_default_provider.status_code == 503
@@ -1243,9 +1243,12 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
             model: str,
             _api_key: str,
             _timeout_seconds: float,
+            *,
+            enable_thinking: bool,
         ) -> None:
             self.governed_provider = "litellm"
             self.governed_model = model
+            assert enable_thinking is False
 
         async def aopen(self) -> None:
             events.append("client_open")
@@ -1270,7 +1273,7 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
     monkeypatch.setattr(production_bindings, "JavaIntakeExchangeClient", BoundExchange)
     runtime = build_graph_runtime_bindings(
         _target_settings(),
-        target_e2e_specialized_provider_factory=lambda _kernel: (),
+        production_runtime_specialized_provider_factory=lambda _kernel: (),
     )
     assert runtime.resource_opener is not None
     await runtime.resource_opener()
@@ -1295,7 +1298,7 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
     )
     failed_runtime = build_graph_runtime_bindings(
         _target_settings(),
-        target_e2e_specialized_provider_factory=lambda _kernel: (),
+        production_runtime_specialized_provider_factory=lambda _kernel: (),
     )
     assert failed_runtime.resource_opener is not None
     await failed_runtime.resource_opener()
@@ -1308,13 +1311,13 @@ async def test_target_intake_preparation_is_explicit_shared_coalesced_and_fail_c
     assert shadow_runtime.intake_infrastructure_preparer is None
     custom_runtime = build_graph_runtime_bindings(
         _target_settings(),
-        target_e2e_provider_factory=lambda _kernel: (),
+        production_runtime_provider_factory=lambda _kernel: (),
     )
     assert custom_runtime.intake_infrastructure_preparer is None
 
 
 @pytest.mark.asyncio
-async def test_target_e2e_default_intake_uses_configured_structured_client(
+async def test_production_runtime_default_intake_uses_configured_structured_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -1326,8 +1329,16 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
             model: str,
             api_key: str,
             timeout_seconds: float,
+            *,
+            enable_thinking: bool,
         ) -> None:
-            captured["client_args"] = (base_url, model, api_key, timeout_seconds)
+            captured["client_args"] = (
+                base_url,
+                model,
+                api_key,
+                timeout_seconds,
+                enable_thinking,
+            )
             self.governed_provider = "litellm"
             self.governed_model = model
 
@@ -1381,14 +1392,14 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
     )
     monkeypatch.setattr(
         production_bindings,
-        "_build_target_e2e_room_providers",
+        "_build_production_runtime_room_providers",
         capture_default_providers,
     )
     settings = _target_settings()
 
     runtime = build_graph_runtime_bindings(
         settings,
-        target_e2e_specialized_provider_factory=lambda _kernel: (),
+        production_runtime_specialized_provider_factory=lambda _kernel: (),
     )
     kernel = GraphExecutorKernel(
         saver=cast(Any, InMemorySaver()),
@@ -1407,6 +1418,7 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
         settings.resolved_llm_model,
         settings.resolved_llm_api_key,
         settings.llm_timeout_seconds,
+        settings.llm_enable_thinking,
     )
     assert captured["exchange_args"] == (
         settings.java_api_service_url,
@@ -1429,7 +1441,7 @@ async def test_target_e2e_default_intake_uses_configured_structured_client(
     assert captured["exchange_closed"] is True
 
 
-def test_target_e2e_evidence_pixels_use_dedicated_java_content_origin() -> None:
+def test_production_runtime_evidence_pixels_use_dedicated_java_content_origin() -> None:
     settings = SimpleNamespace(
         java_api_service_url="http://graph-exchange-proxy:8080",
         java_evidence_content_service_url="http://java-api-service:8080",
@@ -1443,7 +1455,7 @@ def test_target_e2e_evidence_pixels_use_dedicated_java_content_origin() -> None:
         enable_thinking=False,
     )
 
-    workflow = production_bindings._build_target_e2e_evidence_workflow(
+    workflow = production_bindings._build_production_runtime_evidence_workflow(
         settings=settings,
         structured_client=client,
     )
@@ -1452,7 +1464,7 @@ def test_target_e2e_evidence_pixels_use_dedicated_java_content_origin() -> None:
     assert workflow._asset_loader._base_url != settings.java_api_service_url
 
 
-def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> None:
+def test_production_runtime_composite_registers_the_exact_intake_provider_binding() -> None:
     class Provider:
         def __init__(self, room_type: RoomType) -> None:
             self.room_type = room_type
@@ -1468,8 +1480,8 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
         durable_bulkhead=cast(Any, object()),
     )
     providers = tuple(Provider(room_type) for room_type in RoomType)
-    registration = _target_e2e_executor_registration(
-        settings.graph_target_e2e_bindings[0],
+    registration = _production_runtime_executor_registration(
+        settings.graph_production_runtime_bindings[0],
         kernel,
         providers=providers,
         intake_provider="litellm",
@@ -1495,10 +1507,10 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
     ):
         with pytest.raises(
             GraphContractError,
-            match="target-E2E Evidence provider binding is incomplete",
+            match="production-runtime Evidence provider binding is incomplete",
         ):
-            _target_e2e_executor_registration(
-                settings.graph_target_e2e_bindings[0],
+            _production_runtime_executor_registration(
+                settings.graph_production_runtime_bindings[0],
                 kernel,
                 providers=providers,
                 intake_provider="litellm",
@@ -1532,7 +1544,7 @@ def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_o
             graph_key=command.graph_key,
             graph_version=command.graph_version,
             checkpoint_schema_version=command.checkpoint_schema_version,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=f"p9act.v1.{'a' * 32}",
             room_fencing_token=23,
             command_hash="b" * 64,
@@ -1689,7 +1701,7 @@ def test_target_evidence_invocation_binding_accepts_stable_capability_pair_for_o
             )
 
 
-def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(
+def test_production_runtime_explicit_provider_factory_bypasses_live_model_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class UnexpectedLiveClient:
@@ -1709,7 +1721,7 @@ def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(
     )
     runtime = build_graph_runtime_bindings(
         _target_settings(),
-        target_e2e_provider_factory=explicit_provider_factory,
+        production_runtime_provider_factory=explicit_provider_factory,
     )
 
     with pytest.raises(ExplicitProviderFactoryUsed):
@@ -1774,9 +1786,10 @@ def test_exact_intake_graph_key_registers_only_the_dedicated_executor() -> None:
         ("unknown_node", False),
     ],
 )
-async def test_target_e2e_intake_registration_installs_provider_binding_in_stream_lifecycle(
+async def test_production_runtime_intake_registration_installs_provider_binding_in_stream_lifecycle(
     node_name: str,
     expects_provider_record: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider_name = "litellm"
     model_name = "intake-model"
@@ -1845,8 +1858,8 @@ async def test_target_e2e_intake_registration_installs_provider_binding_in_strea
     intake_provider = next(
         provider for provider in providers if provider.room_type is RoomType.INTAKE
     )
-    registration = _target_e2e_executor_registration(
-        settings.graph_target_e2e_bindings[0],
+    registration = _production_runtime_executor_registration(
+        settings.graph_production_runtime_bindings[0],
         GraphExecutorKernel(
             saver=cast(Any, InMemorySaver()),
             gateway=cast(Any, object()),
@@ -1877,7 +1890,7 @@ async def test_target_e2e_intake_registration_installs_provider_binding_in_strea
         action=AdmissionAction.ACQUIRE,
         command=command,
         registry=registry,
-        binding=SimpleNamespace(execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE),
+        binding=SimpleNamespace(execution_lane=GraphGatewayMode.PRODUCTION),
         candidate_authority=object(),
     )
     seeded_execution = _intake_execution(command)
@@ -1887,12 +1900,12 @@ async def test_target_e2e_intake_registration_installs_provider_binding_in_strea
         attempt=cast(Any, SimpleNamespace(provider_call_count=0)),
         fence=replace(
             seeded_execution.fence,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=f"p9act.v1.{'a' * 32}",
             room_fencing_token=1,
             command_hash="c" * 64,
             command_envelope_hash="d" * 64,
-            environment_id="target-e2e-local",
+            environment_id="production-runtime-local",
             environment_generation=1,
             tenant_surrogate=command.tenant_surrogate,
             case_id=command.case_id,
@@ -1965,6 +1978,17 @@ async def test_target_e2e_intake_registration_installs_provider_binding_in_strea
     gateway = Gateway()
     gate = GraphStreamAdmissionGate()
     await gate.start()
+
+    async def isolated_heartbeat(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    # This test owns provider-intent binding only. Lease-heartbeat lifecycle has
+    # dedicated coverage and must not race this in-memory provider stub.
+    monkeypatch.setattr(
+        GatewayBackedGraphCommandStreamService,
+        "_run_lease_heartbeat",
+        isolated_heartbeat,
+    )
     service = GatewayBackedGraphCommandStreamService(
         gateway=cast(Any, gateway),
         executors=ExactShadowExecutorRegistry((registration,)),
@@ -2047,7 +2071,7 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     assert proposal.actor_scope_hash == snapshot["actor_scope_hash"]
     assert proposal.source_snapshot_hash == snapshot["snapshot_hash"]
     assert proposal.source_event_hash is None
-    assert proposal.room_utterance == "Please confirm the requested resolution."
+    assert proposal.room_utterance == "What resolution would you like for the damaged order?"
     projected_dossier = proposal.dossier_patch.model_dump(mode="json", exclude_none=True)
     assert projected_dossier["case_story"]["one_sentence_summary"] == (
         "The imported case concerns the reported damaged order."
@@ -2093,7 +2117,10 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     envelope["authority_input_matrix_hash"] = canonical_sha256(invented_authority)
     envelope["envelope_hash"] = canonical_sha256_omitting(envelope, "envelope_hash")
 
-    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_FORMAL_DERIVATION_INVALID",
+    ):
         bundle.terminal_proposal(authority_injected)
 
 
@@ -2390,16 +2417,15 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
     historical_fact = "商家稍后将上传官方链接以佐证标准编号123345"
     historical_missing_field = "official_document_link_123345"
     terminal_document = _strict_baseline_opening_output()
-    terminal_document["case_detail"].update(
+    terminal_document["ordered_sections"][1]["value"][
+        "one_sentence_summary"
+    ] = historical_fact
+    terminal_document["ordered_sections"][7]["value"].update(
         {
-            "case_story": {"one_sentence_summary": historical_fact},
-            "missing_information": {
-                "missing_facts": [historical_fact],
-                "next_questions": [historical_fact],
-            },
+            "blocking_gaps": [historical_missing_field],
+            "next_questions": [historical_fact],
         }
     )
-    terminal_document["missing_fields"] = [historical_missing_field]
     loaded = LoadedIntakePayload(
         artifact_id=command.domain_snapshot_ref.artifact_id,
         schema_version=command.domain_snapshot_ref.schema_version,
@@ -2440,7 +2466,9 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
     terminal_proposal = IntakeTurnProposal.model_validate(proposal_before)
     terminal_dossier = terminal_proposal.dossier_patch.model_dump(mode="json", exclude_none=True)
     assert terminal_dossier["case_story"]["one_sentence_summary"] == historical_fact
-    assert historical_fact in terminal_dossier["missing_information"]["missing_facts"]
+    assert historical_missing_field in terminal_dossier["missing_information"][
+        "blocking_gaps"
+    ]
     assert historical_fact in terminal_dossier["missing_information"]["next_questions"]
     assert historical_missing_field in terminal_proposal.missing_fields
     terminal_room_utterance = terminal_proposal.room_utterance
@@ -2465,7 +2493,9 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
             self.commits.append(commit)
             canonical_dossier = json.loads(store.proposals[0].canonical_payload)["dossier_patch"]
             assert canonical_dossier["case_story"]["one_sentence_summary"] == historical_fact
-            assert historical_fact in canonical_dossier["missing_information"]["missing_facts"]
+            assert historical_missing_field in canonical_dossier["missing_information"][
+                "blocking_gaps"
+            ]
             assert historical_fact in canonical_dossier["missing_information"]["next_questions"]
             if self.fail_commit:
                 raise GraphTerminalBindingError("terminal commit failed")
@@ -2497,7 +2527,7 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
         checkpointer = saver
 
         async def astream(self, input, config, **kwargs):
-            assert kwargs["stream_mode"] == ["messages", "custom"]
+            assert kwargs["stream_mode"] == ["messages", "custom", "updates"]
             yield (
                 "messages",
                 (
@@ -2529,6 +2559,10 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
                         {"langgraph_node": "intake_lcel"},
                     ),
                 )
+            yield _target_action_gate_update(
+                room_utterance=terminal_room_utterance,
+                source_turn_hash=snapshot["snapshot_hash"],
+            )
             yield (
                 "messages",
                 (
@@ -2713,7 +2747,9 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
             self.proposals.append(proposal)
             canonical_dossier = json.loads(proposal.canonical_payload)["dossier_patch"]
             assert canonical_dossier["case_story"]["one_sentence_summary"] == historical_fact
-            assert historical_fact in canonical_dossier["missing_information"]["missing_facts"]
+            assert historical_missing_field in canonical_dossier["missing_information"][
+                "blocking_gaps"
+            ]
             assert historical_fact in canonical_dossier["missing_information"]["next_questions"]
             return StoredIntakeProposal(
                 artifact_id=proposal.artifact_id,
@@ -2831,8 +2867,8 @@ async def test_target_intake_executor_persists_historical_evidence_reference_to_
     canonical_document = json.loads(store.proposals[0].canonical_payload)
     assert canonical_document["room_utterance"] == terminal_room_utterance
     assert canonical_document["dossier_patch"]["case_story"]["one_sentence_summary"] == historical_fact
-    assert historical_fact in canonical_document["dossier_patch"]["missing_information"][
-        "missing_facts"
+    assert historical_missing_field in canonical_document["dossier_patch"]["missing_information"][
+        "blocking_gaps"
     ]
     assert historical_fact in canonical_document["dossier_patch"]["missing_information"][
         "next_questions"
@@ -4994,14 +5030,16 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
         async for event in executor.stream(execution):
             events.append(event)
 
-    # The first room chunk is already public, but the terminal-bound board must
-    # remain private when a later room-order breach fails the stream.
+    # The action gate authorizes the first room chunk and its following board
+    # delta. A later attempt to append to the closed room stream still fails.
     assert [event.event_type for event in events] == [
         "attempt_started",
+        "visible_delta",
         "visible_delta",
     ]
     assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
         ("room_utterance", "Please confirm the order number?"),
+        ("case_detail.references", '{"order_reference":"RAW-AFTER-ROOM"}'),
     ]
 
 
@@ -5191,10 +5229,9 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
             events.append(event)
 
     expected_visible = [("room_utterance", streamed_room_utterance)]
-    if not target_candidate:
-        expected_visible.append(
-            ("case_detail.references", provisional_board_delta)
-        )
+    expected_visible.append(
+        ("case_detail.references", provisional_board_delta)
+    )
     assert [event.event_type for event in events] == [
         "attempt_started",
         *("visible_delta" for _ in expected_visible),
@@ -5290,7 +5327,7 @@ async def test_compiled_intake_executor_suppresses_provisional_dossier_when_mode
     )
 
     async def load_context(*args: Any) -> object:
-        return object()
+        return SimpleNamespace(ingress_kind="SNAPSHOT")
 
     def terminal_snapshot(*args: Any) -> tuple[Any, Any]:
         return {}, {}

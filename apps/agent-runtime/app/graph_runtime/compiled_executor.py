@@ -25,7 +25,7 @@ from app.graph_runtime.ledger import ResultRecord
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.result import TERMINAL_DRAFT_ADAPTER, ResultBindings, TerminalDraft
 from app.graph_runtime.state import validate_graph_state
-from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
+from app.graph_runtime.production_runtime import ProductionRoomProposalSource
 
 
 class CompiledStateGraphPort(Protocol):
@@ -89,7 +89,7 @@ class GraphPublicUpdate:
 class TerminalResultPlan:
     draft: TerminalDraft | dict[str, object]
     bindings: ResultBindings
-    target_proposal_source: TargetE2ERoomProposalSource | None = None
+    target_proposal_source: ProductionRoomProposalSource | None = None
 
     def materialize(
         self,

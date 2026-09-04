@@ -36,14 +36,14 @@ JAVA_INTAKE_EXCHANGE_ENDPOINTS = {
     "INTAKE_PAYLOAD_LOAD_PATH": "/internal/graph/intake/v2/payload:load",
     "INTAKE_PROPOSAL_PUT_PATH": "/internal/graph/intake/v2/proposals:put",
 }
-JAVA_TARGET_E2E_ROOM_EXCHANGE = GRAPH_RUNTIME / "target_e2e_room_exchange.py"
-JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS = {
-    "TARGET_E2E_ROOM_OBJECT_LOAD_PATH": "/internal/graph/target-e2e/rooms/object:load",
-    "TARGET_E2E_ROOM_PROPOSAL_PUT_PATH": "/internal/graph/target-e2e/rooms/proposal:put",
+JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE = GRAPH_RUNTIME / "production_runtime_room_exchange.py"
+JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS = {
+    "PRODUCTION_RUNTIME_ROOM_OBJECT_LOAD_PATH": "/internal/graph/production-runtime/rooms/object:load",
+    "PRODUCTION_RUNTIME_ROOM_PROPOSAL_PUT_PATH": "/internal/graph/production-runtime/rooms/proposal:put",
 }
 NON_MODEL_HTTP_EXCHANGES = {
     JAVA_INTAKE_EXCHANGE,
-    JAVA_TARGET_E2E_ROOM_EXCHANGE,
+    JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE,
 }
 STATE_KERNEL_FORBIDDEN_MODULES = {
     *MODEL_HTTP_MODULES,
@@ -213,14 +213,14 @@ def test_non_model_http_is_confined_to_fixed_java_intake_exchange_endpoints() ->
     assert sorted(http_client_calls) == ["aclose", "stream"]
 
 
-def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints() -> None:
+def test_production_runtime_non_model_http_is_confined_to_fixed_java_exchange_endpoints() -> None:
     tree = ast.parse(
-        JAVA_TARGET_E2E_ROOM_EXCHANGE.read_text(encoding="utf-8"),
-        filename=str(JAVA_TARGET_E2E_ROOM_EXCHANGE),
+        JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE.read_text(encoding="utf-8"),
+        filename=str(JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE),
     )
     assert {
         module
-        for module in _imports(JAVA_TARGET_E2E_ROOM_EXCHANGE)
+        for module in _imports(JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE)
         if _matches_prefix(module, MODEL_HTTP_MODULES)
     } == {"httpx"}
     assignments = {
@@ -231,9 +231,9 @@ def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints(
         and isinstance(node.value.value, str)
         for target in node.targets
         if isinstance(target, ast.Name)
-        and target.id in JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS
+        and target.id in JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS
     }
-    assert assignments == JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS
+    assert assignments == JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS
 
     allowed_assignment = next(
         node
@@ -254,7 +254,7 @@ def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints(
         element.id
         for element in allowed_paths.elts
         if isinstance(element, ast.Name)
-    } == set(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
+    } == set(JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS)
 
     post_function = next(
         node
@@ -288,8 +288,8 @@ def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints(
         node.args[0].id
         for node in exchange_calls
         if node.args and isinstance(node.args[0], ast.Name)
-    } == set(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
-    assert len(exchange_calls) == len(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
+    } == set(JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS)
+    assert len(exchange_calls) == len(JAVA_PRODUCTION_RUNTIME_ROOM_EXCHANGE_ENDPOINTS)
 
     assert [
         node.func.attr

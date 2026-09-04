@@ -5,7 +5,7 @@ import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
 import com.example.dispute.workflow.application.command.CaseCommandService;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;

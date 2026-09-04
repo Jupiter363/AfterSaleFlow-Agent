@@ -25,22 +25,22 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ActivationLifecycle;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ActivationRegistration;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.BuildBindings;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmissionResult;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandCompletion;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.DatabaseBinding;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.GraphBinding;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.ImageDigests;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.RegistrationDisposition;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.SyntheticCaseScope;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationReceipt;
+import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationReceiptCodec;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphCommandEnvelope;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphEnvelopeCodec;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ActivationLifecycle;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ActivationRegistration;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.BuildBindings;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandAdmission;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandAdmissionResult;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandCompletion;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.DatabaseBinding;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.GraphBinding;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.ImageDigests;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.RegistrationDisposition;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.SyntheticCaseScope;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
@@ -101,9 +101,9 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
     private static final String CASE_BUILD_ID = "case-build-projection-recovery";
     private static final String CONTROL_BUILD_ID = "control-build-projection-recovery";
     private static final String AGENT_BUILD_ID = "agent-build-projection-recovery";
-    private static final String GRAPH_KEY = "all-rooms.target-e2e.v1";
-    private static final String GRAPH_VERSION = "target-e2e-graph.projection-recovery.v1";
-    private static final String CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v1";
+    private static final String GRAPH_KEY = "all-rooms.production-runtime.v1";
+    private static final String GRAPH_VERSION = "production-runtime-graph.projection-recovery.v1";
+    private static final String CHECKPOINT_SCHEMA = "production-runtime-checkpoint.v1";
     private static final String GRAPH_BINDING_HASH = "f".repeat(64);
     private static final String GRAPH_CODE_BUILD_ID = "graph-code-projection-recovery";
     private static final String LOGICAL_INPUT_HASH = "b".repeat(64);
@@ -411,7 +411,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
         assertThat(
                         jdbc.queryForObject(
                                 "select count(*) "
-                                        + "from target_e2e_intake_command_material "
+                                        + "from production_runtime_intake_command_material "
                                         + "where case_id = ?",
                                 Long.class,
                                 CASE_ID))
@@ -436,10 +436,10 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
         RoomGraphCommand source = objectMapper.treeToValue(sourceDocument, RoomGraphCommand.class);
         RoomGraphCommand rootCommand = command(source, ORIGINAL_COMMAND_ID, ROOT_ATTEMPT_ID);
         RoomGraphCommand winningCommand = command(source, WINNING_COMMAND_ID, WINNING_ATTEMPT_ID);
-        TargetE2EGraphEnvelopeCodec envelopeCodec = new TargetE2EGraphEnvelopeCodec(objectMapper);
-        TargetE2EGraphCommandEnvelope rootEnvelope =
+        ProductionGraphEnvelopeCodec envelopeCodec = new ProductionGraphEnvelopeCodec(objectMapper);
+        ProductionGraphCommandEnvelope rootEnvelope =
                 envelopeCodec.wrapCommand(ACTIVATION_ID, FENCING_TOKEN, rootCommand);
-        TargetE2EGraphCommandEnvelope winningEnvelope =
+        ProductionGraphCommandEnvelope winningEnvelope =
                 envelopeCodec.wrapCommand(ACTIVATION_ID, FENCING_TOKEN, winningCommand);
         ExecuteAgentRunRequest rootRequest =
                 new ExecuteAgentRunRequest(
@@ -522,9 +522,9 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                         winningCommand.traceparent(),
                         NOW);
         String manifestHash = ContractJson.sha256Hex(objectMapper.valueToTree(manifest));
-        TargetE2eFinalizationReceipt targetReceipt =
-                TargetE2eFinalizationReceipt.committed(
-                        new TargetE2eFinalizationReceipt.CommitFacts(
+        ProductionFinalizationReceipt targetReceipt =
+                ProductionFinalizationReceipt.committed(
+                        new ProductionFinalizationReceipt.CommitFacts(
                                 ACTIVATION_ID,
                                 TENANT,
                                 CASE_ID,
@@ -747,7 +747,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
 
     private Material material(
             String targetSchema,
-            TargetE2EGraphCommandEnvelope envelope,
+            ProductionGraphCommandEnvelope envelope,
             ExecuteAgentRunRequest request) {
         IntakeTargetAgentRunContext target =
                 new IntakeTargetAgentRunContext(
@@ -792,7 +792,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
             Fixture fixture,
             ActivationRegistration activationRegistration,
             boolean includeWinningMaterial) {
-        TargetE2EActivationLedger ledger =
+        ProductionActivationLedger ledger =
                 registerActivationAndReserveCase(activationRegistration);
 
         insertCaseEpochAndOriginalCommand(fixture);
@@ -826,10 +826,10 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
         insertFormalProjection(fixture);
     }
 
-    private TargetE2EActivationLedger registerActivationAndReserveCase(
+    private ProductionActivationLedger registerActivationAndReserveCase(
             ActivationRegistration activationRegistration) {
-        TargetE2EActivationLedger ledger =
-                new TargetE2EActivationLedger(dataSource, Clock.fixed(NOW, ZoneOffset.UTC));
+        ProductionActivationLedger ledger =
+                new ProductionActivationLedger(dataSource, Clock.fixed(NOW, ZoneOffset.UTC));
         assertThat(ledger.registerOrAttach(activationRegistration).disposition())
                 .isEqualTo(RegistrationDisposition.REGISTERED);
         assertThat(
@@ -892,7 +892,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 "8".repeat(64));
     }
 
-    private CommandAdmission admission(TargetE2EGraphCommandEnvelope envelope) {
+    private CommandAdmission admission(ProductionGraphCommandEnvelope envelope) {
         return new CommandAdmission(
                 ACTIVATION_ID,
                 ACTIVATION_HASH,
@@ -985,11 +985,11 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 now);
         jdbc.update(
                 """
-                insert into target_e2e_room_epoch_binding (
+                insert into production_runtime_room_epoch_binding (
                     epoch_id, activation_id, activation_manifest_hash, execution_lane,
                     isolated_domain_db_binding_hash, tenant_surrogate, case_id,
                     room_type, room_epoch, room_fencing_token, bound_at
-                ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, 'INTAKE', 0, 1, ?)
+                ) values (?, ?, ?, 'PRODUCTION', ?, ?, ?, 'INTAKE', 0, 1, ?)
                 """,
                 EPOCH_ID,
                 ACTIVATION_ID,
@@ -1240,18 +1240,18 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
 
     private void insertMaterial(
             String admissionId,
-            TargetE2EGraphCommandEnvelope envelope,
+            ProductionGraphCommandEnvelope envelope,
             Material material) {
         jdbc.update(
                 """
-                insert into target_e2e_intake_command_material (
+                insert into production_runtime_intake_command_material (
                     admission_id, activation_id, activation_manifest_hash, execution_lane,
                     isolated_domain_db_binding_hash, tenant_surrogate, case_id, command_id,
                     command_hash, command_envelope_hash, room_type, room_epoch,
                     room_fencing_token, material_schema_version, context_schema_version,
                     context_canonical_json, context_sha256, stored_at
-                ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, 'INTAKE',
-                    0, 1, 'target-e2e-intake-command-material.v1',
+                ) values (?, ?, ?, 'PRODUCTION', ?, ?, ?, ?, ?, ?, 'INTAKE',
+                    0, 1, 'production-runtime-intake-command-material.v1',
                     'intake-command-execution-context.v2', ?, ?, ?)
                 """,
                 admissionId,
@@ -1269,10 +1269,10 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
     }
 
     private void insertTargetReceipt(Fixture fixture) {
-        TargetE2eFinalizationReceipt receipt = fixture.targetReceipt();
+        ProductionFinalizationReceipt receipt = fixture.targetReceipt();
         jdbc.update(
                 """
-                insert into target_e2e_finalization_receipt (
+                insert into production_runtime_finalization_receipt (
                     receipt_id, schema_version, execution_lane, activation_id,
                     activation_manifest_hash, tenant_surrogate, case_id, room_type,
                     room_epoch, room_fencing_token, process_revision, stage_sequence,
@@ -1310,7 +1310,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 receipt.isolatedDomainDbBindingHash(),
                 at(receipt.committedAt()),
                 receipt.receiptHash(),
-                TargetE2eFinalizationReceiptCodec.canonicalBytes(receipt),
+                ProductionFinalizationReceiptCodec.canonicalBytes(receipt),
                 at(NOW));
     }
 
@@ -1456,8 +1456,8 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                         jdbc.queryForObject(
                                 """
                                 select count(*)
-                                  from target_e2e_command_admission admission
-                                  join target_e2e_intake_command_material material
+                                  from production_runtime_command_admission admission
+                                  join production_runtime_intake_command_material material
                                     on material.admission_id = admission.admission_id
                                  where admission.activation_id = ?
                                    and admission.case_id = ?
@@ -1476,8 +1476,8 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                         jdbc.queryForObject(
                                 """
                                 select count(*)
-                                  from target_e2e_command_completion completion
-                                  join target_e2e_command_admission admission
+                                  from production_runtime_command_completion completion
+                                  join production_runtime_command_admission admission
                                     on admission.admission_id = completion.admission_id
                                  where admission.command_id = ?
                                    and completion.completion_hash = ?
@@ -1488,13 +1488,13 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
                 .isEqualTo(1);
         byte[] receiptBytes =
                 jdbc.queryForObject(
-                        "select receipt_canonical_bytes from target_e2e_finalization_receipt where receipt_id = ?",
+                        "select receipt_canonical_bytes from production_runtime_finalization_receipt where receipt_id = ?",
                         byte[].class,
                         TARGET_RECEIPT_ID);
-        assertThat(TargetE2eFinalizationReceiptCodec.decodeCanonical(receiptBytes))
+        assertThat(ProductionFinalizationReceiptCodec.decodeCanonical(receiptBytes))
                 .isEqualTo(fixture.targetReceipt());
         assertThat(
-                        TargetE2eFinalizationReceiptCodec.requireManifestHash(
+                        ProductionFinalizationReceiptCodec.requireManifestHash(
                                 fixture.manifest(), fixture.manifestHash()))
                 .isEqualTo(fixture.manifestHash());
         fixture.formalReceipt().requireCanonicalHash();
@@ -1673,7 +1673,7 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
         PersistedContextMaterial persisted =
                 jdbc.queryForObject(
                         "select context_canonical_json, context_sha256 "
-                                + "from target_e2e_intake_command_material where command_id = ?",
+                                + "from production_runtime_intake_command_material where command_id = ?",
                         (result, ignored) ->
                                 new PersistedContextMaterial(
                                         result.getString("context_canonical_json"),
@@ -1788,13 +1788,13 @@ class IntakeProcessProjectionCompletionServiceIntegrationTest {
     private record Fixture(
             RoomGraphCommand rootCommand,
             RoomGraphCommand winningCommand,
-            TargetE2EGraphCommandEnvelope rootEnvelope,
-            TargetE2EGraphCommandEnvelope winningEnvelope,
+            ProductionGraphCommandEnvelope rootEnvelope,
+            ProductionGraphCommandEnvelope winningEnvelope,
             Material rootMaterial,
             Material winningMaterial,
             AgentExecutionManifest manifest,
             String manifestHash,
-            TargetE2eFinalizationReceipt targetReceipt,
+            ProductionFinalizationReceipt targetReceipt,
             IntakeFinalizationReceipt formalReceipt,
             String formalEventJson,
             String operationKey,

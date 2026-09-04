@@ -51,16 +51,16 @@ public record GraphCommandClientProperties(
             throw new IllegalArgumentException(
                     "plaintext graph transport cannot be enabled while the client is disabled");
         }
-        if (mode == Mode.TARGET_E2E_CANDIDATE) {
+        if (mode == Mode.PRODUCTION) {
             if (activationId == null || !TARGET_ACTIVATION_ID.matcher(activationId).matches()) {
                 throw new IllegalArgumentException(
-                        "TARGET_E2E_CANDIDATE graph client requires a bounded activation ID");
+                        "PRODUCTION graph client requires a bounded activation ID");
             }
             if (allowPlaintextTransport
                     || baseUri == null
                     || !"https".equalsIgnoreCase(baseUri.getScheme())) {
                 throw new IllegalArgumentException(
-                        "TARGET_E2E_CANDIDATE graph client requires HTTPS mutual TLS transport");
+                        "PRODUCTION graph client requires HTTPS mutual TLS transport");
             }
         }
     }
@@ -68,6 +68,6 @@ public record GraphCommandClientProperties(
     public enum Mode {
         DISABLED,
         SHADOW,
-        TARGET_E2E_CANDIDATE
+        PRODUCTION
     }
 }

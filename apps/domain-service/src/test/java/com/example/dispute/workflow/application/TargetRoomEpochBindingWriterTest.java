@@ -24,9 +24,9 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProces
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter.BindingContext;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -75,7 +75,7 @@ class TargetRoomEpochBindingWriterTest {
                         RoomEpochAllocationException.class,
                         failure ->
                                 assertThat(failure.reasonCode())
-                                        .isEqualTo("TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE"));
+                                        .isEqualTo("PRODUCTION_RUNTIME_ACTIVATION_BINDING_UNAVAILABLE"));
     }
 
     private static Fixture fixture(ObjectProvider<TargetRoomEpochBindingWriter> writerProvider) {
@@ -135,14 +135,14 @@ class TargetRoomEpochBindingWriterTest {
                 "p9-case-build",
                 TargetTypedRoomProtocol.workflowType(RoomType.INTAKE),
                 "p9-control-build",
-                "all-rooms.target-e2e.v1",
+                "all-rooms.production-runtime.v1",
                 TargetTypedRoomProtocol.GRAPH_VERSION,
-                "target-e2e-checkpoint.v1",
+                "production-runtime-checkpoint.v1",
                 "agent-stream.v2",
                 new TargetActivationBinding(
                         "p9act.v1.0123456789abcdef0123456789abcdef",
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "TARGET_E2E_CANDIDATE",
+                        "PRODUCTION",
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     }
 

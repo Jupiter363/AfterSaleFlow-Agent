@@ -23,7 +23,7 @@ import java.util.Optional;
 public final class IntakeGraphResultFinalizer {
 
     public static final String LEGACY_GRAPH_KEY = "intake.v2";
-    public static final String TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2";
+    public static final String PRODUCTION_RUNTIME_GRAPH_KEY = "all-rooms.production-runtime.v2";
     private static final String TARGET_OUTER_TOOL_POLICY_VERSION = "tools.none.v1";
     private static final String INTAKE_PROPOSAL_TOOL_POLICY_VERSION = "no-tools.v1";
 
@@ -67,7 +67,7 @@ public final class IntakeGraphResultFinalizer {
                 ? Optional.of(preflight)
                 : Optional.empty();
         if (!LEGACY_GRAPH_KEY.equals(expectedGraphKey)
-                && !TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+                && !PRODUCTION_RUNTIME_GRAPH_KEY.equals(expectedGraphKey)) {
             throw new IllegalArgumentException("expectedGraphKey is not an allowed Intake graph");
         }
         this.expectedGraphKey = expectedGraphKey;
@@ -248,7 +248,7 @@ public final class IntakeGraphResultFinalizer {
                 registration.toolPolicyVersion(),
                 authority.profileVersions().toolPolicyVersion(),
                 "tool policy version");
-        if (TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)
+        if (PRODUCTION_RUNTIME_GRAPH_KEY.equals(expectedGraphKey)
                 && !TARGET_OUTER_TOOL_POLICY_VERSION.equals(
                         authority.profileVersions().toolPolicyVersion())) {
             throw rejected(
@@ -457,7 +457,7 @@ public final class IntakeGraphResultFinalizer {
 
     private IntakeTurnProposal.ProfileVersions proposalProfileVersions(
             IntakeTurnProposal.ProfileVersions outerProfiles, RoomGraphCommand command) {
-        if (!TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+        if (!PRODUCTION_RUNTIME_GRAPH_KEY.equals(expectedGraphKey)) {
             return outerProfiles;
         }
         if (ExecuteAgentRunRequest.isParallelIntakeCommand(command)) {

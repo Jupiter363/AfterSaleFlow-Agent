@@ -11,8 +11,8 @@ from types import MappingProxyType
 from typing import Any
 
 
-TARGET_E2E_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v2"
-TARGET_E2E_PROMPT_BUNDLE_NODES = (
+PRODUCTION_RUNTIME_PROMPT_VERSION = "all-rooms-prompt.production-runtime.v2"
+PRODUCTION_RUNTIME_PROMPT_BUNDLE_NODES = (
     "evidence_turn",
     "hearing_intake_questions",
     "hearing_intake_synthesis",
@@ -210,7 +210,7 @@ class PromptComposer:
 
     VERSIONED_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = MappingProxyType(
         {
-            TARGET_E2E_PROMPT_VERSION: frozenset(TARGET_E2E_PROMPT_BUNDLE_NODES),
+            PRODUCTION_RUNTIME_PROMPT_VERSION: frozenset(PRODUCTION_RUNTIME_PROMPT_BUNDLE_NODES),
             **INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES,
         }
     )
@@ -449,9 +449,9 @@ class PromptComposer:
                     f"prompt bundle does not authorize node {node_name}: {prompt_profile_id}"
                 )
             return base_path
-        if prompt_profile_id.startswith("all-rooms-prompt.target-e2e."):
+        if prompt_profile_id.startswith("all-rooms-prompt.production-runtime."):
             raise PromptResourceError(
-                f"target-E2E prompt bundle is not registered: {prompt_profile_id}"
+                f"production-runtime prompt bundle is not registered: {prompt_profile_id}"
             )
 
         profile_path = self._profile_template_path(base_path, prompt_profile_id)

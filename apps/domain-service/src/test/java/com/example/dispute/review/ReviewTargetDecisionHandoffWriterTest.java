@@ -268,7 +268,7 @@ class ReviewTargetDecisionHandoffWriterTest {
 
   private String handoff(long roomEpoch, String receiptId) {
     ObjectNode payload = mapper.createObjectNode();
-    payload.put("schema_version", "target-e2e-review-outcome-handoff.v1");
+    payload.put("schema_version", "production-runtime-review-outcome-handoff.v1");
     payload.put("handoff_id", "HANDOFF_1");
     payload.put("activation_id", "p9act.v1." + "a".repeat(32));
     payload.put("activation_manifest_hash", "b".repeat(64));

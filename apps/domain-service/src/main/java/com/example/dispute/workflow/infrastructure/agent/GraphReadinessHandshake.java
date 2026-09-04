@@ -32,7 +32,7 @@ final class GraphReadinessHandshake {
             "intake-infrastructure-preparation.v1";
     private static final String INTAKE_PREPARATION_READY = "READY";
     private static final String SHADOW_MODE = "SHADOW";
-    private static final String TARGET_E2E_CANDIDATE_MODE = "TARGET_E2E_CANDIDATE";
+    private static final String PRODUCTION_MODE = "PRODUCTION";
     private static final JsonMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .build();
@@ -241,7 +241,7 @@ final class GraphReadinessHandshake {
 
     private static String requireExpectedMode(String candidate) {
         String mode = Objects.requireNonNull(candidate, "expectedMode");
-        if (!SHADOW_MODE.equals(mode) && !TARGET_E2E_CANDIDATE_MODE.equals(mode)) {
+        if (!SHADOW_MODE.equals(mode) && !PRODUCTION_MODE.equals(mode)) {
             throw new IllegalArgumentException("Graph readiness mode is invalid");
         }
         return mode;

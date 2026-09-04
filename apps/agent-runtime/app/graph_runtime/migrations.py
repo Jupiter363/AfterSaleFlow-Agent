@@ -34,16 +34,16 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G003_shadow_comparison.sql",
     "G004_graph_fanout_bulkhead.sql",
     "G005_graph_fanout_fairness_and_cancellation.sql",
-    "G006_target_e2e_candidate.sql",
+    "G006_production_runtime_candidate.sql",
     "G007_graph_thread_checkpoint_parent_chain.sql",
     "G008_graph_thread_fresh_bootstrap.sql",
     "G009_graph_lease_sixty_second_window.sql",
-    "G010_target_e2e_activation_month_window.sql",
+    "G010_production_runtime_activation_month_window.sql",
     "G011_parallel_technical_completion.sql",
     "G012_parallel_subset_technical_completion.sql",
     "G013_graph_fanout_atomic_groups.sql",
     "G014_parallel_receipt_lineage_authority.sql",
-    "G015_target_e2e_test_thread_purge.sql",
+    "G015_production_runtime_test_thread_purge.sql",
     "G016_parallel_receipt_abandonment_authority.sql",
     "G017_fanout_command_terminalization_authority.sql",
 )
@@ -76,12 +76,12 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_fanout_tenant_turn",
     "agent_graph_fanout_permit",
     "agent_graph_fanout_permit_owner_generation",
-    "agent_graph_target_e2e_activation",
-    "agent_graph_target_e2e_environment_generation",
-    "agent_graph_target_e2e_activation_lifecycle",
-    "agent_graph_target_e2e_synthetic_case_reservation",
-    "agent_graph_target_e2e_room_authority",
-    "agent_graph_target_e2e_purge_receipt",
+    "agent_graph_production_runtime_activation",
+    "agent_graph_production_runtime_environment_generation",
+    "agent_graph_production_runtime_activation_lifecycle",
+    "agent_graph_production_runtime_synthetic_case_reservation",
+    "agent_graph_production_runtime_room_authority",
+    "agent_graph_production_runtime_purge_receipt",
 )
 PINNED_PACKAGE_VERSIONS: Final[dict[str, str]] = {
     "langgraph": "1.2.6",
@@ -628,9 +628,9 @@ class GraphMigrationRunner:
             "agent_graph_command",
             "agent_graph_command_attempt",
             "agent_graph_lease",
-            "agent_graph_target_e2e_room_authority",
-            "agent_graph_target_e2e_environment_generation",
-            "agent_graph_target_e2e_activation_lifecycle",
+            "agent_graph_production_runtime_room_authority",
+            "agent_graph_production_runtime_environment_generation",
+            "agent_graph_production_runtime_activation_lifecycle",
         )
         runtime_read_only = (
             "checkpoint_migrations",
@@ -643,7 +643,7 @@ class GraphMigrationRunner:
             "agent_graph_fanout_tenant_turn",
             "agent_graph_fanout_permit",
             "agent_graph_fanout_permit_owner_generation",
-            "agent_graph_target_e2e_purge_receipt",
+            "agent_graph_production_runtime_purge_receipt",
         )
         async with connection.transaction():
             await connection.execute(
@@ -716,12 +716,12 @@ class GraphMigrationRunner:
             )
             await connection.execute(
                 sql.SQL(
-                    "grant select, insert on {}.agent_graph_target_e2e_activation to {}"
+                    "grant select, insert on {}.agent_graph_production_runtime_activation to {}"
                 ).format(schema, runtime)
             )
             await connection.execute(
                 sql.SQL(
-                    "grant select, insert on {}.agent_graph_target_e2e_synthetic_case_reservation to {}"
+                    "grant select, insert on {}.agent_graph_production_runtime_synthetic_case_reservation to {}"
                 ).format(schema, runtime)
             )
             await connection.execute(
@@ -746,7 +746,7 @@ class GraphMigrationRunner:
             )
             await connection.execute(
                 sql.SQL(
-                    "grant select on {}.agent_graph_target_e2e_purge_receipt to {}"
+                    "grant select on {}.agent_graph_production_runtime_purge_receipt to {}"
                 ).format(schema, retention)
             )
             await connection.execute(
@@ -811,11 +811,11 @@ class GraphMigrationRunner:
                 )
             for routine, argument_types in (
                 (
-                    "graph_target_e2e_purge_context_allows",
+                    "graph_production_runtime_purge_context_allows",
                     ("varchar",),
                 ),
                 (
-                    "purge_target_e2e_test_graph_thread",
+                    "purge_production_runtime_test_graph_thread",
                     (
                         "varchar",
                         "varchar",
@@ -977,7 +977,7 @@ async def run_graph_migrations(
     ).run()
 
 
-async def seed_target_e2e_registry(
+async def seed_production_runtime_registry(
     connection_string: str,
     *,
     schema: str,
@@ -985,7 +985,7 @@ async def seed_target_e2e_registry(
     owner_role: str,
     bindings_json: str,
 ) -> None:
-    from app.config import GraphTargetE2EBindingSettings
+    from app.config import GraphProductionBindingSettings
 
     schema = require_sql_identifier(schema, "schema")
     owner_role = require_sql_identifier(owner_role, "owner_role")
@@ -993,10 +993,10 @@ async def seed_target_e2e_registry(
     try:
         candidates = json.loads(bindings_json)
         if not isinstance(candidates, list) or len(candidates) != 1:
-            raise ValueError("one target-E2E binding is required")
-        binding = GraphTargetE2EBindingSettings.model_validate(candidates[0])
+            raise ValueError("one production-runtime binding is required")
+        binding = GraphProductionBindingSettings.model_validate(candidates[0])
     except (TypeError, ValueError, json.JSONDecodeError) as error:
-        raise GraphMigrationError("target-E2E registry seed is invalid") from error
+        raise GraphMigrationError("production-runtime registry seed is invalid") from error
 
     expected = {
         "graph_key": binding.graph_key,
@@ -1027,7 +1027,7 @@ async def seed_target_e2e_registry(
                 await connection.execute("select session_user as session_user")
             ).fetchone()
             if identity is None or identity["session_user"] != expected_user:
-                raise GraphMigrationError("target-E2E registry seed user mismatch")
+                raise GraphMigrationError("production-runtime registry seed user mismatch")
             await connection.execute(
                 sql.SQL("set role {}").format(sql.Identifier(owner_role))
             )
@@ -1035,7 +1035,7 @@ async def seed_target_e2e_registry(
                 await connection.execute("select current_user as current_user")
             ).fetchone()
             if owner is None or owner["current_user"] != owner_role:
-                raise GraphMigrationError("target-E2E registry seed cannot assume owner role")
+                raise GraphMigrationError("production-runtime registry seed cannot assume owner role")
             await connection.execute(
                 sql.SQL("set local search_path to {}, pg_catalog").format(
                     sql.Identifier(schema)
@@ -1082,7 +1082,7 @@ async def seed_target_e2e_registry(
                 )
             ).fetchone()
             if row is None or dict(row) != expected:
-                raise GraphMigrationError("target-E2E registry seed conflicts with storage")
+                raise GraphMigrationError("production-runtime registry seed conflicts with storage")
 
 
 def main() -> None:
@@ -1105,10 +1105,10 @@ def main() -> None:
             environment_generation=environment_generation,
         )
     )
-    target_bindings = os.environ.get("GRAPH_TARGET_E2E_BINDINGS")
+    target_bindings = os.environ.get("GRAPH_PRODUCTION_RUNTIME_BINDINGS")
     if target_bindings:
         asyncio.run(
-            seed_target_e2e_registry(
+            seed_production_runtime_registry(
                 connection_string,
                 schema=schema,
                 expected_user=expected_user,

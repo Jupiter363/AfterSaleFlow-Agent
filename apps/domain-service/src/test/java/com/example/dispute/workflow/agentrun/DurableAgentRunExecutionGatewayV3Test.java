@@ -18,7 +18,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTurnResultV2;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceTurnResultV2;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -348,7 +348,7 @@ class DurableAgentRunExecutionGatewayV3Test {
                 StreamEventType.ATTEMPT_STARTED,
                 request.command().actorScope().audience(), NOW,
                 new AgentStreamEvent.Payload(
-                        "target-e2e", null, null, null, null, null, null, null, null, null));
+                        "production-runtime", null, null, null, null, null, null, null, null, null));
     }
 
     private static AgentStreamEvent visibleDelta(
@@ -466,7 +466,7 @@ class DurableAgentRunExecutionGatewayV3Test {
                 request.command().actorScope().audience(), NOW.plusSeconds(sequence),
                 new AgentStreamEvent.Payload(
                         null, null, null, null, null, null,
-                        "urn:target-e2e:result:1", resultHash, null, null));
+                        "urn:production-runtime:result:1", resultHash, null, null));
     }
 
     private static AgentStreamEvent errorEvent(

@@ -151,7 +151,7 @@ class EvidenceRoomControllerTest {
                         4,
                         9,
                         "TEMPORAL",
-                        "TARGET_E2E_CANDIDATE",
+                        "PRODUCTION",
                         false,
                         true,
                         false,
@@ -176,12 +176,12 @@ class EvidenceRoomControllerTest {
                         EvidenceProcessProjectionView.Recovery.none(),
                         EvidenceProcessProjectionView.VersionPins.target(
                                 "p9-control-build",
-                                "target-e2e-graph.2026-08-18.1",
-                                "target-e2e-checkpoint.v2",
-                                "all-rooms-prompt.target-e2e.v2",
-                                "target-e2e.contract-blocked",
-                                "all-rooms-policy.target-e2e.v1",
-                                "all-rooms-guardrail.target-e2e.v1",
+                                "production-runtime-graph.2026-08-18.1",
+                                "production-runtime-checkpoint.v2",
+                                "all-rooms-prompt.production-runtime.v2",
+                                "production-runtime.contract-blocked",
+                                "all-rooms-policy.production-runtime.v1",
+                                "all-rooms-guardrail.production-runtime.v1",
                                 "tools.none.v1"),
                         12,
                         7,
@@ -200,7 +200,7 @@ class EvidenceRoomControllerTest {
                 .andExpect(jsonPath("$.data.case_id").value(caseId))
                 .andExpect(jsonPath("$.data.writer_mode").value("TEMPORAL"))
                 .andExpect(jsonPath("$.data.graph_runtime_mode")
-                        .value("TARGET_E2E_CANDIDATE"))
+                        .value("PRODUCTION"))
                 .andExpect(jsonPath("$.data.formal_sink_allowed").value(false))
                 .andExpect(jsonPath("$.data.temporal_evidence_allocation_allowed").value(true))
                 .andExpect(jsonPath("$.data.real_case_shadow_allowed").value(false));

@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from app.config import (
-    GraphTargetE2EBindingSettings,
-    GraphTargetE2ERuntimeContextSettings,
+    GraphProductionBindingSettings,
+    GraphProductionRuntimeContextSettings,
 )
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.contracts.v1.models import (
@@ -78,7 +78,7 @@ from app.graph_runtime.registry import (
     RegistryState,
     VersionBinding,
 )
-from app.graph_runtime.target_e2e import TargetE2ERuntimeAuthority
+from app.graph_runtime.production_runtime import ProductionRuntimeAuthority
 from app.security.invocation_envelope import (
     InvocationClaims,
     ReconciliationClaims,
@@ -239,12 +239,12 @@ def _registry() -> RegistryRecord:
     )
 
 
-def _target_e2e_command(
+def _production_runtime_command(
     *,
     actor_role: str = "USER",
     audience: str | None = None,
     room_type: str = "INTAKE",
-    graph_key: str = "all-rooms.target-e2e.v2",
+    graph_key: str = "all-rooms.production-runtime.v2",
     prompt_profile_id: str | None = None,
 ) -> RoomGraphCommand:
     payload = _command().model_dump(
@@ -257,8 +257,8 @@ def _target_e2e_command(
         {
             "room_type": room_type,
             "graph_key": graph_key,
-        "graph_version": "target-e2e-graph.2026-08-18.3",
-            "checkpoint_schema_version": "target-e2e-checkpoint.v2",
+        "graph_version": "production-runtime-graph.2026-08-18.3",
+            "checkpoint_schema_version": "production-runtime-checkpoint.v2",
             "actor_scope": {
                 **payload["actor_scope"],
                 "actor_role": actor_role,
@@ -270,7 +270,7 @@ def _target_e2e_command(
                     prompt_profile_id
                     or f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
                 ),
-                "output_schema_version": "target-e2e-room-proposal-source.v2",
+                "output_schema_version": "production-runtime-room-proposal-source.v2",
             },
         }
     )
@@ -279,23 +279,23 @@ def _target_e2e_command(
     return RoomGraphCommand.model_validate(payload)
 
 
-def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v2") -> RegistryRecord:
+def _production_runtime_registry(*, prompt_version: str = "all-rooms-prompt.production-runtime.v2") -> RegistryRecord:
     record = _registry()
     return replace(
         record,
         binding=replace(
             record.binding,
-            graph_key="all-rooms.target-e2e.v2",
-            graph_version="target-e2e-graph.2026-08-18.3",
-            checkpoint_schema_version="target-e2e-checkpoint.v2",
+            graph_key="all-rooms.production-runtime.v2",
+            graph_version="production-runtime-graph.2026-08-18.3",
+            checkpoint_schema_version="production-runtime-checkpoint.v2",
             prompt_version=prompt_version,
-            output_schema_version="target-e2e-room-proposal-source.v2",
+            output_schema_version="production-runtime-room-proposal-source.v2",
         ),
         state=RegistryState.ACTIVE_CANDIDATE,
     )
 
 
-def _target_e2e_thread(command: RoomGraphCommand) -> ThreadIdentity:
+def _production_runtime_thread(command: RoomGraphCommand) -> ThreadIdentity:
     scope = command.actor_scope
     return ThreadIdentity(
         thread_id=command.thread_id,
@@ -317,32 +317,32 @@ def _target_e2e_thread(command: RoomGraphCommand) -> ThreadIdentity:
     )
 
 
-def _target_e2e_authority(
+def _production_runtime_authority(
     command: RoomGraphCommand,
     registry: RegistryRecord,
     *,
     activation_id: str,
-) -> TargetE2ERuntimeAuthority:
-    context = GraphTargetE2ERuntimeContextSettings.model_validate(
+) -> ProductionRuntimeAuthority:
+    context = GraphProductionRuntimeContextSettings.model_validate(
         {
-            "schemaVersion": "graph-target-e2e-runtime-context.v1",
-            "executionLane": "TARGET_E2E_CANDIDATE",
+            "schemaVersion": "production-runtime-context.v1",
+            "executionLane": "PRODUCTION",
             "activationId": activation_id,
             "activationManifestHash": "f" * 64,
-            "environmentId": "target-e2e-test",
+            "environmentId": "production-runtime-test",
             "environmentGeneration": 1,
             "candidateSha": "c" * 40,
             "issuedAt": NOW,
             "expiresAt": NOW + timedelta(hours=1),
-            "runNonce": "target-e2e-test-run-nonce-000001",
+            "runNonce": "production-runtime-test-run-nonce-000001",
             "tenantSurrogate": command.tenant_surrogate,
             "caseScope": {
                 "mode": "EXPLICIT_CASE_IDS",
                 "allowedCaseIds": [command.case_id],
             },
             "allowedRoomTypes": [command.room_type],
-            "composeProject": "p9_target_e2e",
-            "temporalNamespace": "target-e2e-test",
+            "composeProject": "p9_production_runtime",
+            "temporalNamespace": "production-runtime-test",
             "buildBindings": {
                 "caseBuildId": "case-build-1",
                 "controlBuildId": "control-build-1",
@@ -358,13 +358,13 @@ def _target_e2e_authority(
             "databaseIdentities": {
                 "domain": {
                     "service": "domain-db",
-                    "database": "target_domain",
+                    "database": "production_domain",
                     "schema": "domain_runtime",
                     "expectedUser": "java_domain_runtime",
                 },
                 "graph": {
                     "service": "graph-db",
-                    "database": "target_graph",
+                    "database": "production_graph",
                     "schema": "graph_runtime",
                     "runtimeUser": "graph_runtime",
                     "environmentGeneration": 1,
@@ -376,11 +376,11 @@ def _target_e2e_authority(
         }
     )
     invocation = command.invocation_context
-    runtime_binding = GraphTargetE2EBindingSettings(
+    runtime_binding = GraphProductionBindingSettings(
         graph_key=command.graph_key,
         graph_version=command.graph_version,
         checkpoint_schema_version=command.checkpoint_schema_version,
-        state_schema_version="target-e2e-state.v2",
+        state_schema_version="production-runtime-state.v2",
         state_schema_hash="d" * 64,
         command_schema_version=command.schema_version,
         result_schema_version="room-graph-result.v1",
@@ -396,7 +396,7 @@ def _target_e2e_authority(
         allowed_room_types=("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
         allowed_stage_codes=(command.stage_code,),
     )
-    return TargetE2ERuntimeAuthority.from_context(context, (runtime_binding,))
+    return ProductionRuntimeAuthority.from_context(context, (runtime_binding,))
 
 
 def _command_profile(command: RoomGraphCommand) -> CommandProfileBinding:
@@ -413,17 +413,17 @@ def _command_profile(command: RoomGraphCommand) -> CommandProfileBinding:
 
 
 @pytest.mark.parametrize("actor_role", ("USER", "MERCHANT"))
-def test_target_e2e_intake_accepts_only_the_matching_baseline_prompt_alias(
+def test_production_runtime_intake_accepts_only_the_matching_baseline_prompt_alias(
     actor_role: str,
 ) -> None:
-    command = _target_e2e_command(actor_role=actor_role)
+    command = _production_runtime_command(actor_role=actor_role)
     actual_profile = _command_profile(command)
 
     GraphCommandGateway._require_registry_command_profile(
         command=command,
-        registry=_target_e2e_registry(),
+        registry=_production_runtime_registry(),
         actual_profile=actual_profile,
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
     )
 
     assert actual_profile.prompt_version == f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
@@ -433,56 +433,56 @@ def test_target_e2e_intake_accepts_only_the_matching_baseline_prompt_alias(
     ("command", "registry", "actual_profile", "execution_lane"),
     [
         (
-            _target_e2e_command(prompt_profile_id="all-rooms-prompt.target-e2e.v2"),
-            _target_e2e_registry(),
+            _production_runtime_command(prompt_profile_id="all-rooms-prompt.production-runtime.v2"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(prompt_profile_id="DISPUTE_INTAKE_OFFICER:ADMIN:v1"),
-            _target_e2e_registry(),
+            _production_runtime_command(prompt_profile_id="DISPUTE_INTAKE_OFFICER:ADMIN:v1"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(actor_role="USER", prompt_profile_id="DISPUTE_INTAKE_OFFICER:MERCHANT:v1"),
-            _target_e2e_registry(),
+            _production_runtime_command(actor_role="USER", prompt_profile_id="DISPUTE_INTAKE_OFFICER:MERCHANT:v1"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(actor_role="USER", audience="MERCHANT"),
-            _target_e2e_registry(),
+            _production_runtime_command(actor_role="USER", audience="MERCHANT"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(),
-            _target_e2e_registry(),
+            _production_runtime_command(),
+            _production_runtime_registry(),
             None,
             GraphGatewayMode.SHADOW,
         ),
         (
-            _target_e2e_command(room_type="EVIDENCE"),
-            _target_e2e_registry(),
+            _production_runtime_command(room_type="EVIDENCE"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(graph_key="other.target-e2e.v1"),
-            _target_e2e_registry(),
+            _production_runtime_command(graph_key="other.production-runtime.v1"),
+            _production_runtime_registry(),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
         (
-            _target_e2e_command(),
-            _target_e2e_registry(prompt_version="other-prompt.v1"),
+            _production_runtime_command(),
+            _production_runtime_registry(prompt_version="other-prompt.v1"),
             None,
-            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            GraphGatewayMode.PRODUCTION,
         ),
     ],
 )
-def test_target_e2e_intake_prompt_alias_rejects_wrong_scope_and_legacy_pin(
+def test_production_runtime_intake_prompt_alias_rejects_wrong_scope_and_legacy_pin(
     command: RoomGraphCommand,
     registry: RegistryRecord,
     actual_profile: CommandProfileBinding | None,
@@ -508,10 +508,10 @@ def test_target_e2e_intake_prompt_alias_rejects_wrong_scope_and_legacy_pin(
         "tool_policy_version",
     ),
 )
-def test_target_e2e_intake_prompt_alias_rejects_every_non_prompt_profile_drift(
+def test_production_runtime_intake_prompt_alias_rejects_every_non_prompt_profile_drift(
     profile_field: str,
 ) -> None:
-    command = _target_e2e_command()
+    command = _production_runtime_command()
     actual_profile = replace(
         _command_profile(command),
         **{profile_field: f"drifted-{profile_field}.v1"},
@@ -520,9 +520,9 @@ def test_target_e2e_intake_prompt_alias_rejects_every_non_prompt_profile_drift(
     with pytest.raises(GraphVersionBindingError):
         GraphCommandGateway._require_registry_command_profile(
             command=command,
-            registry=_target_e2e_registry(),
+            registry=_production_runtime_registry(),
             actual_profile=actual_profile,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
         )
 
 
@@ -1130,19 +1130,19 @@ async def test_reconcile_only_rejects_registry_profile_drift_before_nonce_consum
 
 @pytest.mark.asyncio
 async def test_reconcile_only_uses_the_durable_shadow_binding_lane_not_gateway_mode() -> None:
-    command = _target_e2e_command()
+    command = _production_runtime_command()
     gateway, pool, _, recovery = _reconciliation_gateway(
         status=CommandStatus.COMPLETED,
         registry_state=RegistryState.ACTIVE_CANDIDATE,
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
-        registry_record=_target_e2e_registry(),
+        mode=GraphGatewayMode.PRODUCTION,
+        registry_record=_production_runtime_registry(),
     )
 
     with pytest.raises(GraphVersionBindingError):
         await gateway.reconcile_only(
             command=command,
             verified_reconciliation=_verified_reconciliation(command),
-            expected_thread=_target_e2e_thread(command),
+            expected_thread=_production_runtime_thread(command),
             owner_id="worker-reconcile-1",
         )
 
@@ -1334,7 +1334,7 @@ def _execution() -> GatewayExecution:
 
 
 def _parallel_execution(*, provider_call_count: int = 0) -> GatewayExecution:
-    payload = _target_e2e_command().model_dump(
+    payload = _production_runtime_command().model_dump(
         mode="json",
         exclude={"request_hash"},
         exclude_none=True,
@@ -1358,17 +1358,17 @@ def _parallel_execution(*, provider_call_count: int = 0) -> GatewayExecution:
     }
     payload["request_hash"] = canonical_sha256(payload)
     command = RoomGraphCommand.model_validate(payload)
-    registry = _target_e2e_registry()
+    registry = _production_runtime_registry()
     binding = CommandBinding.from_command(
         command,
         tool_policy_version=registry.binding.tool_policy_version,
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=f"p9act.v1.{'8' * 32}",
         room_fencing_token=1,
         command_hash="9" * 64,
         command_envelope_hash="a" * 64,
     )
-    authority = _target_e2e_authority(
+    authority = _production_runtime_authority(
         command,
         registry,
         activation_id=binding.activation_id,
@@ -1391,7 +1391,7 @@ def _parallel_execution(*, provider_call_count: int = 0) -> GatewayExecution:
     admission = GatewayAdmission(
         command=command,
         binding=binding,
-        thread=_target_e2e_thread(command),
+        thread=_production_runtime_thread(command),
         registry=registry,
         record=record,
         action=AdmissionAction.OBSERVE_OR_TAKEOVER,
@@ -1433,7 +1433,7 @@ def _parallel_execution(*, provider_call_count: int = 0) -> GatewayExecution:
         graph_key=command.graph_key,
         graph_version=command.graph_version,
         checkpoint_schema_version=command.checkpoint_schema_version,
-        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        execution_lane=GraphGatewayMode.PRODUCTION,
         activation_id=binding.activation_id,
         room_fencing_token=binding.room_fencing_token,
         command_hash=binding.command_hash,
@@ -1582,7 +1582,7 @@ async def test_parallel_final_retry_terminalizes_only_after_the_exact_lease_expi
     ledger = _ParallelFailureLedger(execution, receipt)
     leases = _ParallelFailureLeases(execution)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -1614,7 +1614,7 @@ async def test_parallel_final_retry_refuses_to_terminate_an_active_execution() -
     ledger = _ParallelFailureLedger(execution, receipt)
     leases = _ParallelFailureLeases(execution, active=True)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2668,7 +2668,7 @@ async def test_initial_parallel_receipt_accepts_thread_scoped_nonfirst_fence() -
     pool = _Pool()
     ledger = _InitialParallelReceiptLedger(execution)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2726,7 +2726,7 @@ async def test_parallel_same_receipt_takeover_rebinds_without_provider_replay() 
     pool = _Pool()
     ledger = _ParallelTakeoverLedger(original)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2758,7 +2758,7 @@ async def test_parallel_same_receipt_takeover_rejects_started_provider_call() ->
     pool = _Pool()
     ledger = _ParallelTakeoverLedger(original)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2790,7 +2790,7 @@ async def test_expired_started_parallel_receipt_gets_one_immutable_abandonment()
     pool = _Pool()
     ledger = _ParallelAbandonmentLedger(original)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2826,7 +2826,7 @@ async def test_active_started_parallel_receipt_cannot_be_abandoned() -> None:
     pool = _Pool()
     ledger = _ParallelAbandonmentLedger(original)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -2874,7 +2874,7 @@ async def test_abandoned_receipt_takeover_retries_only_the_ambiguous_lane() -> N
     }
     successor["receipt_sha256"] = canonical_sha256(successor)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=pool,
         threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
@@ -3026,7 +3026,7 @@ async def test_parallel_technical_completion_adopts_commit_response_loss(
         ambiguous_transaction,
     )
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        mode=GraphGatewayMode.PRODUCTION,
         pool=object(),
         ledger=ledger,  # type: ignore[arg-type]
         leases=leases,  # type: ignore[arg-type]

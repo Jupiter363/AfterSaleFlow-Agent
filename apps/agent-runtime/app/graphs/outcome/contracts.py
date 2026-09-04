@@ -31,7 +31,7 @@ class OutcomeReviewGraphIdentity:
     gateway_command_schema_version: str = "room-graph-command.v1"
     gateway_result_schema_version: str = "room-graph-result.v1"
     proposal_payload_schema_version: str = "outcome-review-proposal.v1"
-    target_proposal_schema_version: str = "target-e2e-review-proposal.v1"
+    target_proposal_schema_version: str = "production-runtime-review-proposal.v1"
 
 
 OUTCOME_REVIEW_IDENTITY: Final = OutcomeReviewGraphIdentity()

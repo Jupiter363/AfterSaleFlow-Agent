@@ -32,8 +32,8 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
 import com.example.dispute.workflow.temporal.caseprocess.ProvisioningCommitment;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -447,7 +447,7 @@ class CaseProcessCarryStateCompatibilityTest {
             0,
             new ActorRef("user-recovery", ActorRole.USER, List.of("evidence:opening")),
             new PayloadRef(
-                "target-e2e-evidence-opening.v1",
+                "production-runtime-evidence-opening.v1",
                 "urn:test:expired-evidence:" + sequence,
                 requestHash,
                 32),

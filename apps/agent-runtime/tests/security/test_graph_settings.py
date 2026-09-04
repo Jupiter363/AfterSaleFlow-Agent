@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import GraphTargetE2EBindingSettings, Settings
+from app.config import GraphProductionBindingSettings, Settings
 
 
 BASE = {
@@ -130,19 +130,19 @@ def test_graph_configuration_rejects_formal_mode_and_unsafe_bounds(overrides) ->
         settings(**overrides)
 
 
-def _target_binding() -> GraphTargetE2EBindingSettings:
-    return GraphTargetE2EBindingSettings(
-        graph_key="all-rooms.target-e2e.v1",
-        graph_version="target-e2e-graph.2026-07-27.1",
-        checkpoint_schema_version="target-e2e-checkpoint.v1",
-        state_schema_version="target-e2e-room-state.v1",
+def _target_binding() -> GraphProductionBindingSettings:
+    return GraphProductionBindingSettings(
+        graph_key="all-rooms.production-runtime.v2",
+        graph_version="production-runtime-graph.2026-08-18.3",
+        checkpoint_schema_version="production-runtime-checkpoint.v2",
+        state_schema_version="production-runtime-room-state.v1",
         state_schema_hash="b" * 64,
         command_schema_version="room-graph-command.v1",
         result_schema_version="room-graph-result.v1",
         agent_profile_id="dispute-intake-officer.v1",
-        prompt_version="intake.user.v1",
-        model_profile_id="qwen3.7-plus.structured.v1",
-        output_schema_version="target-e2e-room-proposal-source.v1",
+        prompt_version="all-rooms-prompt.production-runtime.v2",
+        model_profile_id="production-runtime.contract-blocked",
+        output_schema_version="production-runtime-room-proposal-source.v2",
         policy_version="intake-policy.v1",
         guardrail_version="intake-guardrail.v1",
         tool_policy_version="tools.none.v1",
@@ -155,22 +155,22 @@ def _target_binding() -> GraphTargetE2EBindingSettings:
 
 def _target_settings(**overrides) -> Settings:
     values = {
-        "graph_gateway_mode": "TARGET_E2E_CANDIDATE",
+        "graph_gateway_mode": "PRODUCTION",
         "graph_database_dsn": (
             "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
         ),
         "graph_jwks_url": "http://java-api-service:8080/.well-known/graph-jwks.json",
         "graph_expected_environment_generation": "7",
         "graph_expected_restore_verification_hash": "a" * 64,
-        "graph_target_e2e_isolated": True,
-        "target_e2e_activation_manifest_hash": "e" * 64,
-        "graph_target_e2e_bindings": (_target_binding(),),
-        "graph_target_e2e_runtime_context": {
-            "schemaVersion": "graph-target-e2e-runtime-context.v1",
-            "executionLane": "TARGET_E2E_CANDIDATE",
+        "graph_production_runtime_isolated": True,
+        "production_runtime_activation_manifest_hash": "e" * 64,
+        "graph_production_runtime_bindings": (_target_binding(),),
+        "graph_production_runtime_context": {
+            "schemaVersion": "production-runtime-context.v1",
+            "executionLane": "PRODUCTION",
             "activationId": f"p9act.v1.{'1' * 32}",
             "activationManifestHash": "e" * 64,
-            "environmentId": "target-e2e-local",
+            "environmentId": "production-runtime-local",
             "environmentGeneration": 7,
             "candidateSha": "d" * 40,
             "issuedAt": "2026-07-27T10:00:00Z",
@@ -182,8 +182,8 @@ def _target_settings(**overrides) -> Settings:
                 "allowedCaseIds": ["case-p9-001"],
             },
             "allowedRoomTypes": ["INTAKE"],
-            "composeProject": "p9_target_e2e",
-            "temporalNamespace": "target-e2e-p9",
+            "composeProject": "p9_production_runtime",
+            "temporalNamespace": "production-runtime-p9",
             "buildBindings": {
                 "caseBuildId": "case-build-1",
                 "controlBuildId": "control-build-1",
@@ -220,19 +220,19 @@ def _target_settings(**overrides) -> Settings:
     return settings(**values)
 
 
-def test_target_e2e_mode_is_explicit_isolated_and_fully_bound() -> None:
+def test_production_runtime_mode_is_explicit_isolated_and_fully_bound() -> None:
     configured = _target_settings()
 
-    assert configured.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
-    assert configured.graph_target_e2e_isolated is True
-    assert configured.graph_target_e2e_runtime_context is not None
+    assert configured.graph_gateway_mode == "PRODUCTION"
+    assert configured.graph_production_runtime_isolated is True
+    assert configured.graph_production_runtime_context is not None
 
     with pytest.raises(ValidationError, match="restricted"):
         _target_settings(app_env="production")
     with pytest.raises(ValidationError, match="isolated non-secret runtime context"):
-        _target_settings(graph_target_e2e_isolated=False)
+        _target_settings(graph_production_runtime_isolated=False)
     with pytest.raises(ValidationError, match="exact activation manifest hash"):
-        _target_settings(target_e2e_activation_manifest_hash=None)
+        _target_settings(production_runtime_activation_manifest_hash=None)
     with pytest.raises(ValidationError, match="cannot relabel SHADOW"):
         _target_settings(graph_shadow_bindings=(_target_binding(),))
     with pytest.raises(ValidationError, match="Graph DB settings"):
@@ -242,28 +242,28 @@ def test_target_e2e_mode_is_explicit_isolated_and_fully_bound() -> None:
 def test_checkpoint_recovery_barrier_is_target_only_and_uses_the_fixed_mount() -> None:
     with pytest.raises(ValidationError, match="directory requires"):
         _target_settings(
-            graph_target_e2e_checkpoint_barrier_directory=(
-                "/run/target-e2e/python/recovery-barrier"
+            graph_production_runtime_checkpoint_barrier_directory=(
+                "/run/production-runtime/python/recovery-barrier"
             )
         )
-    with pytest.raises(ValidationError, match="isolated target-E2E mount"):
+    with pytest.raises(ValidationError, match="isolated production-runtime mount"):
         _target_settings(
-            graph_target_e2e_checkpoint_barrier_enabled=True,
-            graph_target_e2e_checkpoint_barrier_directory=(
-                "/run/target-e2e/python/recovery-barrier"
+            graph_production_runtime_checkpoint_barrier_enabled=True,
+            graph_production_runtime_checkpoint_barrier_directory=(
+                "/run/production-runtime/python/recovery-barrier"
             ),
         )
-    with pytest.raises(ValidationError, match="TARGET_E2E_CANDIDATE"):
-        settings(graph_target_e2e_checkpoint_barrier_enabled=True)
+    with pytest.raises(ValidationError, match="PRODUCTION"):
+        settings(graph_production_runtime_checkpoint_barrier_enabled=True)
 
     configured = _target_settings(
-        app_env="target-e2e",
-        graph_target_e2e_checkpoint_barrier_enabled=True,
-        graph_target_e2e_checkpoint_barrier_directory=(
-            "/run/target-e2e/python/recovery-barrier"
+        app_env="production-runtime",
+        graph_production_runtime_checkpoint_barrier_enabled=True,
+        graph_production_runtime_checkpoint_barrier_directory=(
+            "/run/production-runtime/python/recovery-barrier"
         ),
     )
-    assert configured.graph_target_e2e_checkpoint_barrier_enabled is True
-    assert configured.graph_target_e2e_checkpoint_barrier_directory == Path(
-        "/run/target-e2e/python/recovery-barrier"
+    assert configured.graph_production_runtime_checkpoint_barrier_enabled is True
+    assert configured.graph_production_runtime_checkpoint_barrier_directory == Path(
+        "/run/production-runtime/python/recovery-barrier"
     )

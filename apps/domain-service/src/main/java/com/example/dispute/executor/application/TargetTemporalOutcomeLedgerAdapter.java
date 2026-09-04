@@ -11,7 +11,7 @@ import java.util.Objects;
 
 /** Formal target-lane adapter over the shared Java-authoritative Outcome ledger. */
 public final class TargetTemporalOutcomeLedgerAdapter {
-  static final String ADAPTER_ID = "TARGET_E2E_MANIFEST_NOOP";
+  static final String ADAPTER_ID = "PRODUCTION_RUNTIME_MANIFEST_NOOP";
   static final String ADAPTER_VERSION = "v1";
 
   private final OutcomeOperationLedger ledger;

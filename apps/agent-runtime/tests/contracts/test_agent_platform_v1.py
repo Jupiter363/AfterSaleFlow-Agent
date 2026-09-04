@@ -168,7 +168,7 @@ def test_shared_output_schema_does_not_route_a_legacy_intake_command(
     )
     instance = deepcopy(fixture["instance"])
     instance["invocation_context"]["output_schema_version"] = (
-        "target-e2e-room-proposal-source.v2"
+        "production-runtime-room-proposal-source.v2"
     )
 
     command = codec.decode("room-graph-command.schema.json", instance)
@@ -213,7 +213,7 @@ def _parallel_intake_command(provider_budget: int) -> dict[str, object]:
         "dispute-intake-officer.parallel-frames.v1"
     )
     instance["invocation_context"]["output_schema_version"] = (
-        "target-e2e-room-proposal-source.v2"
+        "production-runtime-room-proposal-source.v2"
     )
     instance["retry_budget"]["provider_attempts_remaining"] = provider_budget
     return instance

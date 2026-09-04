@@ -42,7 +42,7 @@ class GraphReadinessCoordinatorTest {
     private static final Duration INTERVAL = Duration.ofSeconds(5);
     private static final Duration MINIMUM_PROBE_TIMEOUT = Duration.ofMillis(100);
     private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(1);
-    private static final String MODE = "TARGET_E2E_CANDIDATE";
+    private static final String MODE = "PRODUCTION";
 
     @Test
     void settingsEnforceClosedBoundsAndDeriveFreshness() {

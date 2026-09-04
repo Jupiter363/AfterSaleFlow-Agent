@@ -132,13 +132,13 @@ class TrustedGraphTransportFactoryTest {
                 200,
                 baseUri.resolve("ready/graph"),
                 Map.of("Content-Type", List.of("application/json")),
-                readyDocument("TARGET_E2E_CANDIDATE")),
+                readyDocument("PRODUCTION")),
                 Duration.ofMillis(3100));
         GraphTransportBundle bundle = createTrustedBundle(client, baseUri);
 
         assertThat(client.requests()).isEmpty();
         long started = System.nanoTime();
-        bundle.verifyReadiness(Duration.ofSeconds(4), "TARGET_E2E_CANDIDATE");
+        bundle.verifyReadiness(Duration.ofSeconds(4), "PRODUCTION");
         Duration elapsed = Duration.ofNanos(System.nanoTime() - started);
 
         assertThat(client.requests()).singleElement().satisfies(request -> {
@@ -253,10 +253,10 @@ class TrustedGraphTransportFactoryTest {
                 200,
                 baseUri.resolve("ready/graph"),
                 Map.of("Content-Type", List.of("application/json")),
-                readyDocument("TARGET_E2E_CANDIDATE")));
+                readyDocument("PRODUCTION")));
         client.terminationResults(false, true);
         GraphReadinessCoordinator.Settings settings = new GraphReadinessCoordinator.Settings(
-                Duration.ofSeconds(15), Duration.ofSeconds(5), "TARGET_E2E_CANDIDATE");
+                Duration.ofSeconds(15), Duration.ofSeconds(5), "PRODUCTION");
         GraphTransportBundle bundle = createTrustedBundle(client, baseUri, settings);
         JdkGraphCommandHttpTransport commandTransport =
                 (JdkGraphCommandHttpTransport) bundle.commandTransport();
@@ -341,7 +341,7 @@ class TrustedGraphTransportFactoryTest {
         GraphTransportBundle bundle = createTrustedBundle(client, baseUri);
 
         assertThatThrownBy(() -> bundle.verifyReadiness(
-                        Duration.ofSeconds(1), "TARGET_E2E_CANDIDATE"))
+                        Duration.ofSeconds(1), "PRODUCTION"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageStartingWith("Graph readiness");
 
@@ -363,38 +363,38 @@ class TrustedGraphTransportFactoryTest {
                         302,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE")),
+                        readyDocument("PRODUCTION")),
                 Arguments.of(
                         "response URI drift",
                         200,
                         URI.create("https://graph.example.test:8443/other"),
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE")),
+                        readyDocument("PRODUCTION")),
                 Arguments.of(
                         "wrong content type",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("text/plain")),
-                        readyDocument("TARGET_E2E_CANDIDATE")),
+                        readyDocument("PRODUCTION")),
                 Arguments.of(
                         "duplicate content type",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json", "application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE")),
+                        readyDocument("PRODUCTION")),
                 Arguments.of(
                         "not ready",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "\"ready\":true", "\"ready\":false")),
                 Arguments.of(
                         "not accepting",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "\"accepting\":true", "\"accepting\":false")),
                 Arguments.of(
                         "mode mismatch",
@@ -407,49 +407,49 @@ class TrustedGraphTransportFactoryTest {
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "GRAPH_READY", "GRAPH_NOT_READY")),
                 Arguments.of(
                         "persistence mismatch",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "GRAPH_PERSISTENCE_READY", "GRAPH_DB_UNAVAILABLE")),
                 Arguments.of(
                         "security mismatch",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "GRAPH_JWKS_READY", "GRAPH_JWKS_UNAVAILABLE")),
                 Arguments.of(
                         "bulkhead mismatch",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "GRAPH_BULKHEAD_READY", "GRAPH_BULKHEAD_UNAVAILABLE")),
                 Arguments.of(
                         "extra field",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "}", ",\"extra\":true}")),
                 Arguments.of(
                         "duplicate ready member",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE").replace(
+                        readyDocument("PRODUCTION").replace(
                                 "\"ready\":true", "\"ready\":true,\"ready\":true")),
                 Arguments.of(
                         "oversized body",
                         200,
                         exact,
                         Map.of("Content-Type", List.of("application/json")),
-                        readyDocument("TARGET_E2E_CANDIDATE") + "x".repeat(4096)));
+                        readyDocument("PRODUCTION") + "x".repeat(4096)));
     }
 
     private static String readyDocument(String mode) {

@@ -300,7 +300,7 @@ class CaseApplicationServiceTest {
                 .thenReturn(
                         new RoomEpochAllocation(
                                 "EPOCH_TARGET_INTAKE",
-                                "target-e2e",
+                                "production-runtime",
                                 "CASE_TARGET_INTAKE",
                                 "ROOM_TARGET_INTAKE",
                                 ContractTypes.RoomType.INTAKE,

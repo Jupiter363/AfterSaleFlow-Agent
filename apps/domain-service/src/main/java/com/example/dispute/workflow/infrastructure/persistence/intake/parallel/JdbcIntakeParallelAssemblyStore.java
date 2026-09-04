@@ -20,9 +20,9 @@ import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
-import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphResultEnvelope;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphCommandEnvelope;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphEnvelopeCodec;
+import com.example.dispute.workflow.runtime.graph.ProductionGraphResultEnvelope;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -262,14 +262,14 @@ public class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblySt
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final AgentPlatformContractCodec contractCodec;
-    private final TargetE2EGraphEnvelopeCodec envelopeCodec;
+    private final ProductionGraphEnvelopeCodec envelopeCodec;
 
     public JdbcIntakeParallelAssemblyStore(
             NamedParameterJdbcTemplate jdbc, ObjectMapper objectMapper) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
         this.contractCodec = new AgentPlatformContractCodec();
-        this.envelopeCodec = new TargetE2EGraphEnvelopeCodec(this.objectMapper, contractCodec);
+        this.envelopeCodec = new ProductionGraphEnvelopeCodec(this.objectMapper, contractCodec);
     }
 
     @Override
@@ -652,7 +652,7 @@ public class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblySt
                     "proposal canonical bytes do not bind their self-hash");
         }
 
-        TargetE2EGraphCommandEnvelope command =
+        ProductionGraphCommandEnvelope command =
                 envelopeCodec.decodeCommand(artifact.canonicalCommandEnvelopeBytes());
         if (!artifact.commandEnvelopeSha256().equals(command.commandEnvelopeHash())
                 || !MessageDigest.isEqual(
@@ -668,7 +668,7 @@ public class JdbcIntakeParallelAssemblyStore implements IntakeParallelAssemblySt
                 artifact.targetProposalSha256());
         JsonNode proposalSourceDocument = parseBytes(proposalSource, "proposal source artifact");
         requireCanonical(proposalSource, proposalSourceDocument, "proposal source artifact");
-        TargetE2EGraphResultEnvelope resultEnvelope = envelopeCodec.decodeResult(
+        ProductionGraphResultEnvelope resultEnvelope = envelopeCodec.decodeResult(
                 artifact.canonicalResultEnvelopeBytes(), command, proposalSource);
         if (!artifact.resultEnvelopeSha256().equals(resultEnvelope.resultEnvelopeHash())
                 || !artifact.graphResultSha256().equals(resultEnvelope.resultHash())

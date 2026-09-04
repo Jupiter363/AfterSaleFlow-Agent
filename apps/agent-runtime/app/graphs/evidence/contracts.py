@@ -34,19 +34,19 @@ JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 EvidenceExecutionScope: TypeAlias = Literal[
     "SIGNED_SYNTHETIC_ONLY",
-    "TARGET_E2E_CANDIDATE",
+    "PRODUCTION",
 ]
-EvidenceAdmissionMode: TypeAlias = Literal["SHADOW", "TARGET_E2E_CANDIDATE"]
+EvidenceAdmissionMode: TypeAlias = Literal["SHADOW", "PRODUCTION"]
 
 ASSESSMENT_OUTPUT_SCHEMA_VERSION = "evidence-item-assessment.v1"
 TERMINAL_OUTPUT_SCHEMA_VERSION = "evidence-batch-proposal.v1"
 EVIDENCE_GRAPH_KEY = "evidence.v2"
 EVIDENCE_GRAPH_VERSION = "evidence.v2.0.0"
 EVIDENCE_STATE_SCHEMA_VERSION = "evidence-graph-state.v2"
-TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v2"
-TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-08-18.3"
-TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v2"
-TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v2"
+PRODUCTION_RUNTIME_GRAPH_KEY = "all-rooms.production-runtime.v2"
+PRODUCTION_RUNTIME_GRAPH_VERSION = "production-runtime-graph.2026-08-18.3"
+PRODUCTION_RUNTIME_CHECKPOINT_SCHEMA_VERSION = "production-runtime-checkpoint.v2"
+PRODUCTION_RUNTIME_OUTPUT_SCHEMA_VERSION = "production-runtime-room-proposal-source.v2"
 MAX_MANIFEST_ITEMS = 100
 MAX_ACTIVE_ITEMS = 8
 
@@ -73,8 +73,8 @@ _RFC3339_INSTANT = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
 )
 _SYNTHETIC_PARSE_REF = re.compile(r"^urn:synthetic-evidence-parse:[A-Za-z0-9._:/-]{1,470}$")
-_TARGET_E2E_OBJECT_REF = re.compile(
-    r"^urn:target-e2e:object:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:([0-9a-f]{64})$"
+_PRODUCTION_RUNTIME_OBJECT_REF = re.compile(
+    r"^urn:production-runtime:object:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:([0-9a-f]{64})$"
 )
 _COMMAND_FIELDS = frozenset(
     {
@@ -469,7 +469,7 @@ class EvidenceAdmissionVerifier:
             _verify_synthetic_shadow_scope(manifest)
         _verify_manifest_membership(manifest, target_candidate=target_candidate)
         admission = VerifiedEvidenceAdmission(
-            runtime_mode=("TARGET_E2E_CANDIDATE" if target_candidate else "SHADOW"),
+            runtime_mode=("PRODUCTION" if target_candidate else "SHADOW"),
             room_graph_command=command,
             manifest=manifest,
             registry_output_schema_version=request.registry_output_schema_version,
@@ -522,8 +522,8 @@ def evidence_execution_scope(
     admission: VerifiedEvidenceAdmission,
 ) -> EvidenceExecutionScope:
     validate_verified_admission(admission)
-    if admission.runtime_mode == "TARGET_E2E_CANDIDATE":
-        return "TARGET_E2E_CANDIDATE"
+    if admission.runtime_mode == "PRODUCTION":
+        return "PRODUCTION"
     return "SIGNED_SYNTHETIC_ONLY"
 
 
@@ -542,12 +542,12 @@ def _verify_room_graph_command(
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_SCHEMA_INVALID")
     if command.get("room_type") != "EVIDENCE":
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_ROOM_TYPE_INVALID")
-    expected_graph_key = TARGET_E2E_GRAPH_KEY if target_candidate else EVIDENCE_GRAPH_KEY
+    expected_graph_key = PRODUCTION_RUNTIME_GRAPH_KEY if target_candidate else EVIDENCE_GRAPH_KEY
     expected_graph_version = (
-        TARGET_E2E_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION
+        PRODUCTION_RUNTIME_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION
     )
     expected_checkpoint = (
-        TARGET_E2E_CHECKPOINT_SCHEMA_VERSION if target_candidate else None
+        PRODUCTION_RUNTIME_CHECKPOINT_SCHEMA_VERSION if target_candidate else None
     )
     if command.get("graph_key") != expected_graph_key:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_GRAPH_KEY_INVALID")
@@ -659,7 +659,7 @@ def _verify_raw_snapshot_reference(
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_PAYLOAD_SIZE_MISMATCH")
     uri = snapshot.get("uri")
     match = _CONTENT_ADDRESSED_URI.fullmatch(uri) if isinstance(uri, str) else None
-    target_match = _TARGET_E2E_OBJECT_REF.fullmatch(uri) if isinstance(uri, str) else None
+    target_match = _PRODUCTION_RUNTIME_OBJECT_REF.fullmatch(uri) if isinstance(uri, str) else None
     if (
         match is None
         or match.group(1) != full_hash
@@ -793,7 +793,7 @@ def _verify_manifest_schema_shape(
         _require_identifier(profiles.get(name), "EVIDENCE_PROFILE_INVALID")
     if (
         profiles.get("graph_version")
-        != (TARGET_E2E_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION)
+        != (PRODUCTION_RUNTIME_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION)
         or profiles.get("state_schema_version") != EVIDENCE_STATE_SCHEMA_VERSION
     ):
         raise EvidenceGraphContractError("EVIDENCE_PROFILE_INVALID")
@@ -897,7 +897,7 @@ def _verify_output_pins(
     terminal_pin = profiles.get("terminal_output_schema_version")
     assessment_pin = profiles.get("assessment_output_schema_version")
     transport_output = (
-        TARGET_E2E_OUTPUT_SCHEMA_VERSION
+        PRODUCTION_RUNTIME_OUTPUT_SCHEMA_VERSION
         if target_candidate
         else TERMINAL_OUTPUT_SCHEMA_VERSION
     )
@@ -972,12 +972,12 @@ def _verify_synthetic_shadow_scope(manifest: JsonObject) -> None:
 
 def _verify_target_candidate_scope(manifest: JsonObject) -> None:
     if (
-        manifest.get("execution_scope") != "TARGET_E2E_CANDIDATE"
+        manifest.get("execution_scope") != "PRODUCTION"
         or manifest.get("writer_mode") != "PROPOSAL_ONLY"
         or manifest.get("formal_sink_eligible") is not False
         or manifest.get("graph_execution_allowed") is not True
     ):
-        raise EvidenceGraphContractError("EVIDENCE_TARGET_E2E_SCOPE_REQUIRED")
+        raise EvidenceGraphContractError("EVIDENCE_PRODUCTION_RUNTIME_SCOPE_REQUIRED")
 
 
 def _verify_manifest_membership(manifest: JsonObject, *, target_candidate: bool) -> None:
@@ -1158,7 +1158,7 @@ def _verify_item_parse_binding(item: Mapping[str, Any], *, target_candidate: boo
     parse_hash = item.get("parse_hash")
     if status == "AVAILABLE":
         target_match = (
-            _TARGET_E2E_OBJECT_REF.fullmatch(parse_ref)
+            _PRODUCTION_RUNTIME_OBJECT_REF.fullmatch(parse_ref)
             if isinstance(parse_ref, str)
             else None
         )
@@ -1168,7 +1168,7 @@ def _verify_item_parse_binding(item: Mapping[str, Any], *, target_candidate: boo
             or not (
                 _SYNTHETIC_PARSE_REF.fullmatch(parse_ref)
                 if not target_candidate
-                else _TARGET_E2E_OBJECT_REF.fullmatch(parse_ref)
+                else _PRODUCTION_RUNTIME_OBJECT_REF.fullmatch(parse_ref)
             )
         ):
             raise EvidenceGraphContractError("EVIDENCE_ITEM_PARSE_BINDING_INVALID")

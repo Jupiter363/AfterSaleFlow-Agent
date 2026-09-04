@@ -73,14 +73,14 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
 import com.example.dispute.workflow.temporal.caseprocess.ProcessedCommandIdentity;
 import com.example.dispute.workflow.temporal.caseprocess.TargetIntakeCommandTerminalNoCommit;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
-import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmissionSnapshot;
-import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.CommandLookup;
-import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunTerminalNoCommit;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger;
+import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandAdmissionSnapshot;
+import com.example.dispute.workflow.runtime.persistence.material.TargetIntakeCommandMaterialStore;
+import com.example.dispute.workflow.runtime.persistence.material.TargetIntakeCommandMaterialStore.CommandLookup;
+import com.example.dispute.workflow.runtime.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterial;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunTerminalNoCommit;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
@@ -121,7 +121,7 @@ public class CaseProcessLedgerActivitiesImpl
     private final AgentRunStreamEventRepository agentRunStreamEventRepository;
     private final TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore;
     private final TargetEvidenceCommandMaterialStore targetEvidenceCommandMaterialStore;
-    private final TargetE2EActivationLedger targetE2EActivationLedger;
+    private final ProductionActivationLedger productionActivationLedger;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -135,7 +135,7 @@ public class CaseProcessLedgerActivitiesImpl
             AgentRunRepository agentRunRepository,
             AgentRunAttemptRepository agentRunAttemptRepository,
             @Nullable TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore,
-            @Nullable TargetE2EActivationLedger targetE2EActivationLedger,
+            @Nullable ProductionActivationLedger productionActivationLedger,
             ObjectMapper objectMapper,
             Clock clock) {
         this(
@@ -149,7 +149,7 @@ public class CaseProcessLedgerActivitiesImpl
                 agentRunAttemptRepository,
                 targetIntakeCommandMaterialStore,
                 null,
-                targetE2EActivationLedger,
+                productionActivationLedger,
                 objectMapper,
                 clock);
     }
@@ -165,7 +165,7 @@ public class CaseProcessLedgerActivitiesImpl
             AgentRunAttemptRepository agentRunAttemptRepository,
             @Nullable TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore,
             @Nullable TargetEvidenceCommandMaterialStore targetEvidenceCommandMaterialStore,
-            @Nullable TargetE2EActivationLedger targetE2EActivationLedger,
+            @Nullable ProductionActivationLedger productionActivationLedger,
             ObjectMapper objectMapper,
             Clock clock) {
         this(
@@ -180,7 +180,7 @@ public class CaseProcessLedgerActivitiesImpl
                 null,
                 targetIntakeCommandMaterialStore,
                 targetEvidenceCommandMaterialStore,
-                targetE2EActivationLedger,
+                productionActivationLedger,
                 objectMapper,
                 clock);
     }
@@ -198,7 +198,7 @@ public class CaseProcessLedgerActivitiesImpl
             AgentRunStreamEventRepository agentRunStreamEventRepository,
             @Nullable TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore,
             @Nullable TargetEvidenceCommandMaterialStore targetEvidenceCommandMaterialStore,
-            @Nullable TargetE2EActivationLedger targetE2EActivationLedger,
+            @Nullable ProductionActivationLedger productionActivationLedger,
             ObjectMapper objectMapper,
             Clock clock) {
         this.commandRepository = commandRepository;
@@ -212,7 +212,7 @@ public class CaseProcessLedgerActivitiesImpl
         this.agentRunStreamEventRepository = agentRunStreamEventRepository;
         this.targetIntakeCommandMaterialStore = targetIntakeCommandMaterialStore;
         this.targetEvidenceCommandMaterialStore = targetEvidenceCommandMaterialStore;
-        this.targetE2EActivationLedger = targetE2EActivationLedger;
+        this.productionActivationLedger = productionActivationLedger;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -1019,7 +1019,7 @@ public class CaseProcessLedgerActivitiesImpl
                     "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_MATERIAL_STORE_UNAVAILABLE",
                     "target Evidence command material store is unavailable");
         }
-        if (targetE2EActivationLedger == null) {
+        if (productionActivationLedger == null) {
             throw permanentFailure(
                     "TARGET_EVIDENCE_TERMINAL_NO_COMMIT_ACTIVATION_LEDGER_UNAVAILABLE",
                     "target activation ledger is unavailable");
@@ -1064,7 +1064,7 @@ public class CaseProcessLedgerActivitiesImpl
                     "target Evidence command material conflicts with terminal authority");
         }
         CommandAdmissionSnapshot durableAdmission =
-                targetE2EActivationLedger
+                productionActivationLedger
                         .queryCommandAdmission(material.activationId(), command.commandId())
                         .orElseThrow(
                                 () ->
@@ -1706,10 +1706,10 @@ public class CaseProcessLedgerActivitiesImpl
                     "TARGET_INTAKE_TERMINAL_NO_COMMIT_MATERIAL_STORE_UNAVAILABLE",
                     "target Intake command material store is unavailable");
         }
-        if (targetE2EActivationLedger == null) {
+        if (productionActivationLedger == null) {
             throw permanentFailure(
                     "TARGET_INTAKE_TERMINAL_NO_COMMIT_ACTIVATION_LEDGER_UNAVAILABLE",
-                    "target E2E activation ledger is unavailable");
+                    "production runtime activation ledger is unavailable");
         }
         String expectedExecutionRequestHash =
                 TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION.equals(
@@ -1768,7 +1768,7 @@ public class CaseProcessLedgerActivitiesImpl
                     "target Intake command material conflicts with terminal authority");
         }
         CommandAdmissionSnapshot admissionSnapshot =
-                targetE2EActivationLedger
+                productionActivationLedger
                         .queryCommandAdmission(authority.activationId(), authority.commandId())
                         .orElseThrow(
                                 () ->

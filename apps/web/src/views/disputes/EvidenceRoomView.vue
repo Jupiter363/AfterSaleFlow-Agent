@@ -166,35 +166,35 @@ const signedSyntheticProjection = computed(() =>
 const targetTemporalProjection = computed(() =>
   (processProjection.value?.schema_version || processProjection.value?.schemaVersion) ===
     "evidence-process-projection.v1" &&
-  projectionRuntimeMode.value === "TARGET_E2E_CANDIDATE" &&
+  projectionRuntimeMode.value === "PRODUCTION" &&
   projectionWriterMode.value === "TEMPORAL" &&
   processProjection.value?.formal_sink_allowed === false &&
   processProjection.value?.temporal_evidence_allocation_allowed === true &&
   processProjection.value?.real_case_shadow_allowed === false &&
   projectionManifestItemCount.value !== null &&
   Boolean(projectionVersionPins.value?.workflow_build_id) &&
-  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-08-18.3" &&
-  projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v2" &&
+  projectionVersionPins.value?.graph_version === "production-runtime-graph.2026-08-18.3" &&
+  projectionVersionPins.value?.checkpoint_schema_version === "production-runtime-checkpoint.v2" &&
   projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
-  projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v2" &&
-  projectionVersionPins.value?.model_profile_id === "target-e2e.contract-blocked" &&
+  projectionVersionPins.value?.prompt_version === "all-rooms-prompt.production-runtime.v2" &&
+  projectionVersionPins.value?.model_profile_id === "production-runtime.contract-blocked" &&
   projectionVersionPins.value?.assessment_output_schema_version ===
     "evidence-item-assessment.v1" &&
   projectionVersionPins.value?.terminal_output_schema_version ===
     "evidence-batch-proposal.v1" &&
-  projectionVersionPins.value?.policy_version === "all-rooms-policy.target-e2e.v1" &&
-  projectionVersionPins.value?.guardrail_version === "all-rooms-guardrail.target-e2e.v1" &&
+  projectionVersionPins.value?.policy_version === "all-rooms-policy.production-runtime.v1" &&
+  projectionVersionPins.value?.guardrail_version === "all-rooms-guardrail.production-runtime.v1" &&
   projectionVersionPins.value?.tool_policy_version === "tools.none.v1",
 );
 const targetProjectionClaimed = computed(() =>
   projectionWriterMode.value === "TEMPORAL" ||
-  projectionRuntimeMode.value === "TARGET_E2E_CANDIDATE",
+  projectionRuntimeMode.value === "PRODUCTION",
 );
 const projectionDisplay = computed(() => {
   if (!processProjection.value) return null;
   if (targetTemporalProjection.value) {
     return {
-      kind: "TARGET_E2E_CANDIDATE",
+      kind: "PRODUCTION",
       count: projectionManifestItemCount.value,
       countLabel: "项证据",
       label: "Temporal 证据流程",

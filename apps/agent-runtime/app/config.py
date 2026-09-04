@@ -70,11 +70,11 @@ class GraphShadowBindingSettings(BaseModel):
         return self
 
 
-class GraphTargetE2EBindingSettings(GraphShadowBindingSettings):
-    """Deployment-owned exact binding for an isolated target-E2E candidate."""
+class GraphProductionBindingSettings(GraphShadowBindingSettings):
+    """Deployment-owned exact binding for an isolated production-runtime candidate."""
 
 
-class GraphTargetE2EExplicitCaseScope(BaseModel):
+class GraphProductionExplicitCaseScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     mode: Literal["EXPLICIT_CASE_IDS"]
@@ -87,11 +87,11 @@ class GraphTargetE2EExplicitCaseScope(BaseModel):
         if len(values) != len(set(values)) or any(
             pattern.fullmatch(value) is None for value in values
         ):
-            raise ValueError("target-E2E explicit case IDs are invalid")
+            raise ValueError("production-runtime explicit case IDs are invalid")
         return values
 
 
-class GraphTargetE2ESyntheticCaseScope(BaseModel):
+class GraphProductionSyntheticCaseScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     mode: Literal["ISOLATED_SYNTHETIC_NEW_CASES"]
@@ -103,13 +103,13 @@ class GraphTargetE2ESyntheticCaseScope(BaseModel):
     externalEffectsAllowed: Literal[False]
 
 
-GraphTargetE2ECaseScope = Annotated[
-    GraphTargetE2EExplicitCaseScope | GraphTargetE2ESyntheticCaseScope,
+GraphProductionCaseScope = Annotated[
+    GraphProductionExplicitCaseScope | GraphProductionSyntheticCaseScope,
     Field(discriminator="mode"),
 ]
 
 
-class GraphTargetE2EBuildBindings(BaseModel):
+class GraphProductionBuildBindings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     caseBuildId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -117,7 +117,7 @@ class GraphTargetE2EBuildBindings(BaseModel):
     agentBuildId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
-class GraphTargetE2EImageDigests(BaseModel):
+class GraphProductionImageDigests(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     javaApi: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -127,7 +127,7 @@ class GraphTargetE2EImageDigests(BaseModel):
     frontend: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
-class GraphTargetE2EDomainDatabaseIdentity(BaseModel):
+class GraphProductionDomainDatabaseIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     service: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$")
@@ -140,7 +140,7 @@ class GraphTargetE2EDomainDatabaseIdentity(BaseModel):
     expectedUser: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
 
 
-class GraphTargetE2EGraphDatabaseIdentity(BaseModel):
+class GraphProductionGraphDatabaseIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     service: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$")
@@ -155,11 +155,11 @@ class GraphTargetE2EGraphDatabaseIdentity(BaseModel):
     restoreVerificationHash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
-class GraphTargetE2EDatabaseIdentities(BaseModel):
+class GraphProductionDatabaseIdentities(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    domain: GraphTargetE2EDomainDatabaseIdentity
-    graph: GraphTargetE2EGraphDatabaseIdentity
+    domain: GraphProductionDomainDatabaseIdentity
+    graph: GraphProductionGraphDatabaseIdentity
 
     @model_validator(mode="after")
     def validate_physical_isolation(self) -> Self:
@@ -167,17 +167,17 @@ class GraphTargetE2EDatabaseIdentities(BaseModel):
             self.domain.service == self.graph.service
             or self.domain.database == self.graph.database
         ):
-            raise ValueError("target-E2E Domain and Graph databases are not physically isolated")
+            raise ValueError("production-runtime Domain and Graph databases are not physically isolated")
         return self
 
 
-class GraphTargetE2ERuntimeContextSettings(BaseModel):
+class GraphProductionRuntimeContextSettings(BaseModel):
     """Strict non-secret projection produced by the Java deployment control plane."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schemaVersion: Literal["graph-target-e2e-runtime-context.v1"]
-    executionLane: Literal["TARGET_E2E_CANDIDATE"]
+    schemaVersion: Literal["production-runtime-context.v1"]
+    executionLane: Literal["PRODUCTION"]
     activationId: str = Field(pattern=r"^p9act\.v1\.[0-9a-f]{32}$")
     activationManifestHash: str = Field(pattern=r"^[0-9a-f]{64}$")
     environmentId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -191,15 +191,15 @@ class GraphTargetE2ERuntimeContextSettings(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$",
     )
     tenantSurrogate: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-    caseScope: GraphTargetE2ECaseScope
+    caseScope: GraphProductionCaseScope
     allowedRoomTypes: tuple[
         Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"], ...
     ] = Field(min_length=1, max_length=4, strict=False)
     composeProject: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")
     temporalNamespace: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-    buildBindings: GraphTargetE2EBuildBindings
-    imageDigests: GraphTargetE2EImageDigests
-    databaseIdentities: GraphTargetE2EDatabaseIdentities
+    buildBindings: GraphProductionBuildBindings
+    imageDigests: GraphProductionImageDigests
+    databaseIdentities: GraphProductionDatabaseIdentities
     trustedSigningKeyIds: tuple[str, ...] = Field(min_length=1, max_length=16, strict=False)
     perCommandManifestAllowed: Literal[False]
 
@@ -211,16 +211,16 @@ class GraphTargetE2ERuntimeContextSettings(BaseModel):
             or self.expiresAt <= self.issuedAt
             or (self.expiresAt - self.issuedAt).total_seconds() > 2_592_000
         ):
-            raise ValueError("target-E2E runtime context time window is invalid")
+            raise ValueError("production-runtime runtime context time window is invalid")
         if len(set(self.allowedRoomTypes)) != len(self.allowedRoomTypes):
-            raise ValueError("target-E2E allowed rooms must be unique")
+            raise ValueError("production-runtime allowed rooms must be unique")
         key_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
         if len(set(self.trustedSigningKeyIds)) != len(self.trustedSigningKeyIds) or any(
             key_pattern.fullmatch(value) is None for value in self.trustedSigningKeyIds
         ):
-            raise ValueError("target-E2E trusted signing key IDs are invalid")
+            raise ValueError("production-runtime trusted signing key IDs are invalid")
         if self.databaseIdentities.graph.environmentGeneration != self.environmentGeneration:
-            raise ValueError("target-E2E Graph database generation differs from the run")
+            raise ValueError("production-runtime Graph database generation differs from the run")
         return self
 
 
@@ -371,7 +371,7 @@ class Settings(BaseSettings):
     evaluation_prompt_version: str = "evaluation-v1"
     enable_sensitive_log_masking: bool = True
     graph_gateway_mode: Literal[
-        "DISABLED", "SHADOW", "TARGET_E2E_CANDIDATE"
+        "DISABLED", "SHADOW", "PRODUCTION"
     ] = "DISABLED"
     graph_database_dsn: SecretStr | None = None
     graph_database_name: str = "dispute_graph"
@@ -410,30 +410,30 @@ class Settings(BaseSettings):
         default=(),
         max_length=64,
     )
-    graph_target_e2e_isolated: bool = False
-    graph_target_e2e_checkpoint_barrier_enabled: bool = False
-    graph_target_e2e_checkpoint_barrier_directory: Path | None = None
-    graph_target_e2e_checkpoint_barrier_maximum_wait_seconds: float = Field(
+    graph_production_runtime_isolated: bool = False
+    graph_production_runtime_checkpoint_barrier_enabled: bool = False
+    graph_production_runtime_checkpoint_barrier_directory: Path | None = None
+    graph_production_runtime_checkpoint_barrier_maximum_wait_seconds: float = Field(
         default=30.0,
         gt=0,
         le=30,
     )
-    graph_target_e2e_checkpoint_barrier_durability_timeout_seconds: float = Field(
+    graph_production_runtime_checkpoint_barrier_durability_timeout_seconds: float = Field(
         default=2.0,
         gt=0,
         le=5,
     )
-    graph_target_e2e_checkpoint_barrier_poll_interval_seconds: float = Field(
+    graph_production_runtime_checkpoint_barrier_poll_interval_seconds: float = Field(
         default=0.05,
         gt=0,
         le=1,
     )
-    target_e2e_activation_manifest_hash: str | None = Field(
+    production_runtime_activation_manifest_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
-    graph_target_e2e_runtime_context: GraphTargetE2ERuntimeContextSettings | None = None
-    graph_target_e2e_bindings: tuple[GraphTargetE2EBindingSettings, ...] = Field(
+    graph_production_runtime_context: GraphProductionRuntimeContextSettings | None = None
+    graph_production_runtime_bindings: tuple[GraphProductionBindingSettings, ...] = Field(
         default=(),
         max_length=4,
     )
@@ -454,7 +454,7 @@ class Settings(BaseSettings):
             raise ValueError("production graph pool min size must be positive")
         if not self.graph_expected_spiffe_id.startswith("spiffe://"):
             raise ValueError("graph_expected_spiffe_id must be a SPIFFE URI")
-        if self.graph_gateway_mode in {"SHADOW", "TARGET_E2E_CANDIDATE"}:
+        if self.graph_gateway_mode in {"SHADOW", "PRODUCTION"}:
             minimum_idle_transaction_timeout = self.llm_timeout_seconds + 30.0
             if (
                 self.graph_idle_in_transaction_timeout_seconds
@@ -477,29 +477,29 @@ class Settings(BaseSettings):
                     "active graph mode requires graph_expected_restore_verification_hash"
                 )
             self._validate_graph_runtime_dsn(self.graph_database_dsn.get_secret_value())
-        if self.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
-            if self.app_env.lower() not in {"local", "test", "target-e2e"}:
+        if self.graph_gateway_mode == "PRODUCTION":
+            if self.app_env.lower() not in {"local", "test", "production-runtime"}:
                 raise ValueError(
-                    "TARGET_E2E_CANDIDATE is restricted to local/test/target-e2e"
+                    "PRODUCTION is restricted to local/test/production-runtime"
                 )
-            context = self.graph_target_e2e_runtime_context
-            if not self.graph_target_e2e_isolated or context is None:
+            context = self.graph_production_runtime_context
+            if not self.graph_production_runtime_isolated or context is None:
                 raise ValueError(
-                    "TARGET_E2E_CANDIDATE requires an isolated non-secret runtime context"
+                    "PRODUCTION requires an isolated non-secret runtime context"
                 )
-            if self.target_e2e_activation_manifest_hash is None:
+            if self.production_runtime_activation_manifest_hash is None:
                 raise ValueError(
-                    "TARGET_E2E_CANDIDATE requires the exact activation manifest hash"
+                    "PRODUCTION requires the exact activation manifest hash"
                 )
-            if context.activationManifestHash != self.target_e2e_activation_manifest_hash:
+            if context.activationManifestHash != self.production_runtime_activation_manifest_hash:
                 raise ValueError(
-                    "TARGET_E2E_CANDIDATE manifest hash differs from the runtime context"
+                    "PRODUCTION manifest hash differs from the runtime context"
                 )
-            if not self.graph_target_e2e_bindings:
-                raise ValueError("TARGET_E2E_CANDIDATE requires exact target-E2E bindings")
+            if not self.graph_production_runtime_bindings:
+                raise ValueError("PRODUCTION requires exact production-runtime bindings")
             if self.graph_shadow_bindings or self.graph_shadow_threads:
                 raise ValueError(
-                    "TARGET_E2E_CANDIDATE cannot relabel SHADOW bindings or threads"
+                    "PRODUCTION cannot relabel SHADOW bindings or threads"
                 )
             graph_database = context.databaseIdentities.graph
             expected_graph_database = (
@@ -517,44 +517,44 @@ class Settings(BaseSettings):
                 graph_database.restoreVerificationHash,
             )
             if projected_graph_database != expected_graph_database:
-                raise ValueError("target-E2E runtime context differs from Graph DB settings")
+                raise ValueError("production-runtime runtime context differs from Graph DB settings")
             configured_rooms = {
                 room
-                for binding in self.graph_target_e2e_bindings
+                for binding in self.graph_production_runtime_bindings
                 for room in binding.allowed_room_types
             }
             if not set(context.allowedRoomTypes).issubset(configured_rooms):
-                raise ValueError("target-E2E runtime room scope exceeds executor bindings")
-            if len(self.graph_target_e2e_bindings) != 1:
-                raise ValueError("target-E2E requires one shared all-room executor binding")
-            composite = self.graph_target_e2e_bindings[0]
+                raise ValueError("production-runtime runtime room scope exceeds executor bindings")
+            if len(self.graph_production_runtime_bindings) != 1:
+                raise ValueError("production-runtime requires one shared all-room executor binding")
+            composite = self.graph_production_runtime_bindings[0]
             if (
-            composite.graph_key != "all-rooms.target-e2e.v2"
-            or composite.graph_version != "target-e2e-graph.2026-08-18.3"
-            or composite.checkpoint_schema_version != "target-e2e-checkpoint.v2"
+            composite.graph_key != "all-rooms.production-runtime.v2"
+            or composite.graph_version != "production-runtime-graph.2026-08-18.3"
+            or composite.checkpoint_schema_version != "production-runtime-checkpoint.v2"
                 or composite.output_schema_version
-            != "target-e2e-room-proposal-source.v2"
+            != "production-runtime-room-proposal-source.v2"
                 or frozenset(composite.allowed_room_types)
                 != frozenset({"INTAKE", "EVIDENCE", "HEARING", "REVIEW"})
             ):
-                raise ValueError("target-E2E shared executor differs from the frozen binding")
-            if self.graph_target_e2e_checkpoint_barrier_enabled:
-                expected_directory = Path("/run/target-e2e/python/recovery-barrier")
+                raise ValueError("production-runtime shared executor differs from the frozen binding")
+            if self.graph_production_runtime_checkpoint_barrier_enabled:
+                expected_directory = Path("/run/production-runtime/python/recovery-barrier")
                 if (
-                    self.app_env.lower() != "target-e2e"
-                    or not self.graph_target_e2e_isolated
-                    or self.graph_target_e2e_checkpoint_barrier_directory
+                    self.app_env.lower() != "production-runtime"
+                    or not self.graph_production_runtime_isolated
+                    or self.graph_production_runtime_checkpoint_barrier_directory
                     != expected_directory
                 ):
                     raise ValueError(
-                        "checkpoint recovery barrier requires the isolated target-E2E mount"
+                        "checkpoint recovery barrier requires the isolated production-runtime mount"
                     )
-            elif self.graph_target_e2e_checkpoint_barrier_directory is not None:
+            elif self.graph_production_runtime_checkpoint_barrier_directory is not None:
                 raise ValueError(
                     "checkpoint recovery barrier directory requires the barrier to be enabled"
                 )
-        elif self.graph_target_e2e_checkpoint_barrier_enabled:
-            raise ValueError("checkpoint recovery barrier requires TARGET_E2E_CANDIDATE")
+        elif self.graph_production_runtime_checkpoint_barrier_enabled:
+            raise ValueError("checkpoint recovery barrier requires PRODUCTION")
         binding_keys = {
             (
                 binding.graph_key,
@@ -612,10 +612,10 @@ class Settings(BaseSettings):
                 binding.graph_version,
                 binding.checkpoint_schema_version,
             )
-            for binding in self.graph_target_e2e_bindings
+            for binding in self.graph_production_runtime_bindings
         }
-        if len(target_binding_keys) != len(self.graph_target_e2e_bindings):
-            raise ValueError("graph_target_e2e_bindings contains a duplicate exact version")
+        if len(target_binding_keys) != len(self.graph_production_runtime_bindings):
+            raise ValueError("graph_production_runtime_bindings contains a duplicate exact version")
         return self
 
     def _validate_graph_runtime_dsn(self, value: str) -> None:

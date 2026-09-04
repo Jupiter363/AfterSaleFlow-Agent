@@ -150,7 +150,7 @@ def require_parallel_intake_execution(execution: GatewayExecution) -> None:
     invocation = command.invocation_context
     actor_scope = command.actor_scope
     if (
-        fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+        fence.execution_lane is not GraphGatewayMode.PRODUCTION
         or isinstance(fence.room_fencing_token, bool)
         or not isinstance(fence.room_fencing_token, int)
         or fence.room_fencing_token < 1

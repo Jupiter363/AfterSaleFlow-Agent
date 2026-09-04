@@ -107,7 +107,7 @@ class IntakeParallelFrameAssemblerTest {
         assertThat(first.artifactId())
                 .isEqualTo("intake.proposal." + first.proposalSha256().substring(0, 32));
         assertThat(first.artifactUri())
-                .isEqualTo("urn:target-e2e:proposal:intake:" + first.proposalSha256());
+                .isEqualTo("urn:production-runtime:proposal:intake:" + first.proposalSha256());
         assertThat(first.proposal().schemaVersion()).isEqualTo("intake-turn-proposal.v2");
         assertThat(first.proposal().dossierPatch().at("/case_story/one_sentence_summary").asText())
                 .isEqualTo("本轮补充了核心事实");
@@ -726,8 +726,8 @@ class IntakeParallelFrameAssemblerTest {
                 "d".repeat(64),
                 "e".repeat(64),
                 "PARALLEL_FRAMES_V1",
-                "all-rooms.target-e2e.v2",
-                "target-e2e-room-proposal-source.v2",
+                "all-rooms.production-runtime.v2",
+                "production-runtime-room-proposal-source.v2",
                 new ProfileVersions(
                         "graph.v1",
                         "checkpoint.v1",

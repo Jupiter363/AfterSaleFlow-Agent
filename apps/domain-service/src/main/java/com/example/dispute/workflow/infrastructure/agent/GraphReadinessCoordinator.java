@@ -545,7 +545,7 @@ public final class GraphReadinessCoordinator implements AutoCloseable {
                         "Graph readiness timeout must be between 100ms and 15s and less than interval");
             }
             if (!"SHADOW".equals(expectedMode)
-                    && !"TARGET_E2E_CANDIDATE".equals(expectedMode)) {
+                    && !"PRODUCTION".equals(expectedMode)) {
                 throw new IllegalArgumentException("Graph readiness mode is invalid");
             }
         }

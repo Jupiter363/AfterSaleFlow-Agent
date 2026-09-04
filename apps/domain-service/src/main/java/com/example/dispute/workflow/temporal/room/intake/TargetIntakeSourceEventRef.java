@@ -5,7 +5,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import java.util.Objects;
 
 /**
- * Target-only observation of a case-timeline event that occupies the Intake event sequence.
+ * Production-only observation of a case-timeline event that occupies the Intake event sequence.
  *
  * <p>The cursor event carries no Intake business transition. It exists only so the child can
  * observe the same contiguous case-event cursor used by the durable formal turn receipts.

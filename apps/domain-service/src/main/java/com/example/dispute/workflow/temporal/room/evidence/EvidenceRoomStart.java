@@ -32,7 +32,7 @@ public record EvidenceRoomStart(
 
   public enum ExecutionLane {
     LEGACY,
-    TARGET_E2E_CANDIDATE
+    PRODUCTION
   }
 
   /** Omits LEGACY from JSON so pre-field Workflow and Activity payload bytes remain stable. */
@@ -156,7 +156,7 @@ public record EvidenceRoomStart(
           "legacy Evidence room start cannot contain frozen projection authority");
     }
     if (frozenSubmission) {
-      if (executionLane != ExecutionLane.TARGET_E2E_CANDIDATE
+      if (executionLane != ExecutionLane.PRODUCTION
           || projectionRef == null
           || projectionRef.isBlank()
           || projectionRef.length() > 1024
@@ -169,13 +169,13 @@ public record EvidenceRoomStart(
     }
   }
 
-  public boolean targetE2eCandidate() {
-    return executionLane == ExecutionLane.TARGET_E2E_CANDIDATE;
+  public boolean productionCandidate() {
+    return executionLane == ExecutionLane.PRODUCTION;
   }
 
   /** Legacy target marker retained only behind the Workflow version gate for old histories. */
   public boolean legacyTargetBuildMarker() {
-    return workflowBuildId.startsWith("target-e2e");
+    return workflowBuildId.startsWith("production-runtime");
   }
 
   public boolean freezeBound() {

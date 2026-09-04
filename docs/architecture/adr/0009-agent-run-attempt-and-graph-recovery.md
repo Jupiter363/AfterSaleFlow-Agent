@@ -10,7 +10,7 @@
 
 The attempt/command/lease distinctions and fail-closed recovery rules in this ADR remain current.
 Its original `DISABLED`/synthetic-`SHADOW` restriction applied to the Phase 3 implementation
-window. The later manifest-bound `TARGET_E2E_CANDIDATE` lane is implemented and has completed an
+window. The later manifest-bound `PRODUCTION` lane is implemented and has completed an
 isolated browser UAT; this does not authorize automatic production activation. Current runtime
 identity and evidence are recorded in
 [the current UAT baseline](../../release/current-uat-baseline.md), while default and target

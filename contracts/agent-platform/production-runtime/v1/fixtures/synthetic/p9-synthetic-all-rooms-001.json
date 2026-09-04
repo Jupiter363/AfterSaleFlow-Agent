@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "production-runtime-synthetic-fixture-set.v1",
+  "fixtureSetId": "p9-synthetic-all-rooms-001",
+  "caseIdPrefix": "CASE_P9_SYNTHETIC_",
+  "maximumCases": 4,
+  "roomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
+  "scenarios": [
+    {"fixtureId": "p9-intake-001", "roomType": "INTAKE", "inputSchemaVersion": "production-runtime-intake-input.v1", "inputHash": "1111111111111111111111111111111111111111111111111111111111111111", "expectedTerminalClass": "COMPLETED"},
+    {"fixtureId": "p9-evidence-001", "roomType": "EVIDENCE", "inputSchemaVersion": "production-runtime-evidence-input.v1", "inputHash": "2222222222222222222222222222222222222222222222222222222222222222", "expectedTerminalClass": "COMPLETED"},
+    {"fixtureId": "p9-hearing-001", "roomType": "HEARING", "inputSchemaVersion": "production-runtime-hearing-input.v1", "inputHash": "3333333333333333333333333333333333333333333333333333333333333333", "expectedTerminalClass": "COMPLETED"},
+    {"fixtureId": "p9-review-001", "roomType": "REVIEW", "inputSchemaVersion": "production-runtime-review-input.v1", "inputHash": "4444444444444444444444444444444444444444444444444444444444444444", "expectedTerminalClass": "NEEDS_REVIEW"}
+  ]
+}

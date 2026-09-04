@@ -54,10 +54,10 @@ import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExec
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedger;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
-import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
-import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessDispatcher;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ProductionAgentDeploymentBinding;
+import com.example.dispute.workflow.runtime.temporal.ProductionTemporalWorkerRegistration;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomCaseProcessDispatcher;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
@@ -752,7 +752,7 @@ class TemporalWorkerConfigurationTest {
                              executionGatewayProvider,
                              finalizationGatewayProvider,
                              mockProvider(AgentRunFinalizationFailureRecorder.class),
-                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                             mockProvider(ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
@@ -784,7 +784,7 @@ class TemporalWorkerConfigurationTest {
                      provider(mock(AgentRunExecutionGateway.class)),
                      provider(mock(AgentRunFinalizationGateway.class)),
                      provider(mock(AgentRunFinalizationFailureRecorder.class)),
-                     mockProvider(TargetE2eAgentDeploymentBinding.class));
+                     mockProvider(ProductionAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
                 assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
@@ -820,7 +820,7 @@ class TemporalWorkerConfigurationTest {
                                              provider(mock(AgentRunFinalizationGateway.class)),
                                              provider(mock(AgentRunFinalizationFailureRecorder.class)),
                                              mockProvider(
-                                                    TargetE2eAgentDeploymentBinding.class)))
+                                                    ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("target AGENT deployment binding");
 
@@ -864,7 +864,7 @@ class TemporalWorkerConfigurationTest {
                              mockProvider(AgentRunExecutionGateway.class),
                              provider(mock(AgentRunFinalizationGateway.class)),
                              provider(mock(AgentRunFinalizationFailureRecorder.class)),
-                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                             mockProvider(ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("exactly one AgentRunExecutionGateway");
         }
@@ -897,7 +897,7 @@ class TemporalWorkerConfigurationTest {
                                 provider(mock(AgentRunExecutionGateway.class)),
                                 provider(mock(AgentRunFinalizationGateway.class)),
                                 recorderProvider,
-                                mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                                mockProvider(ProductionAgentDeploymentBinding.class)))
                         .as("recorder provider %s", recorderProvider)
                         .isInstanceOf(IllegalStateException.class)
                         .hasMessageContaining(
@@ -931,7 +931,7 @@ class TemporalWorkerConfigurationTest {
                          mockProvider(AgentRunExecutionGateway.class),
                          mockProvider(AgentRunFinalizationGateway.class),
                          mockProvider(AgentRunFinalizationFailureRecorder.class),
-                         mockProvider(TargetE2eAgentDeploymentBinding.class));
+                         mockProvider(ProductionAgentDeploymentBinding.class));
                 try {
                     assertThat(factory.isStarted()).isTrue();
                 } finally {
@@ -970,7 +970,7 @@ class TemporalWorkerConfigurationTest {
                              mockProvider(AgentRunExecutionGateway.class),
                              mockProvider(AgentRunFinalizationGateway.class),
                              mockProvider(AgentRunFinalizationFailureRecorder.class),
-                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                             mockProvider(ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "Signed synthetic Intake requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
@@ -998,7 +998,7 @@ class TemporalWorkerConfigurationTest {
                      mockProvider(AgentRunExecutionGateway.class),
                      mockProvider(AgentRunFinalizationGateway.class),
                      mockProvider(AgentRunFinalizationFailureRecorder.class),
-                     mockProvider(TargetE2eAgentDeploymentBinding.class));
+                     mockProvider(ProductionAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
                 assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
@@ -1044,7 +1044,7 @@ class TemporalWorkerConfigurationTest {
                              executionGatewayProvider,
                              finalizationGatewayProvider,
                              mockProvider(AgentRunFinalizationFailureRecorder.class),
-                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                             mockProvider(ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "Signed synthetic Intake cannot share AGENT_EXECUTION with AgentRunV2");
@@ -1076,7 +1076,7 @@ class TemporalWorkerConfigurationTest {
                              mockProvider(AgentRunExecutionGateway.class),
                              mockProvider(AgentRunFinalizationGateway.class),
                              mockProvider(AgentRunFinalizationFailureRecorder.class),
-                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                             mockProvider(ProductionAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "exactly one IntakeSyntheticWorkerRegistration");
@@ -1777,7 +1777,7 @@ class TemporalWorkerConfigurationTest {
             TemporalWorkerProperties properties,
             String legacyTaskQueue,
             ProcessProjectionActivitiesImpl projectionActivities,
-            TargetTemporalWorkerRegistration targetRegistration) {
+            ProductionTemporalWorkerRegistration targetRegistration) {
         return createFactory(
                 environment,
                 properties,
@@ -1793,7 +1793,7 @@ class TemporalWorkerConfigurationTest {
             String legacyTaskQueue,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
-            TargetTemporalWorkerRegistration targetRegistration) {
+            ProductionTemporalWorkerRegistration targetRegistration) {
         AppProperties appProperties = mock(AppProperties.class);
         when(appProperties.temporal())
                 .thenReturn(
@@ -1815,7 +1815,7 @@ class TemporalWorkerConfigurationTest {
                      mockProvider(AgentRunExecutionGateway.class),
                      mockProvider(AgentRunFinalizationGateway.class),
                      mockProvider(AgentRunFinalizationFailureRecorder.class),
-                     mockProvider(TargetE2eAgentDeploymentBinding.class));
+                     mockProvider(ProductionAgentDeploymentBinding.class));
         }
         return configuration.temporalControlWorkerFactory(
                 environment.getWorkflowClient(),
@@ -1940,7 +1940,7 @@ class TemporalWorkerConfigurationTest {
 
     private static GraphCommandClientProperties targetGraphClientProperties() {
         return new GraphCommandClientProperties(
-                GraphCommandClientProperties.Mode.TARGET_E2E_CANDIDATE,
+                GraphCommandClientProperties.Mode.PRODUCTION,
                 URI.create("https://graph-target.test"),
                 "p9act.v1.0123456789abcdef0123456789abcdef",
                 Duration.ofSeconds(10),
@@ -1956,8 +1956,8 @@ class TemporalWorkerConfigurationTest {
                 true);
     }
 
-    private static TargetE2eAgentDeploymentBinding targetBinding(String agentBuildId) {
-        return new TargetE2eAgentDeploymentBinding(
+    private static ProductionAgentDeploymentBinding targetBinding(String agentBuildId) {
+        return new ProductionAgentDeploymentBinding(
                 "local-preprod",
                 1,
                 "p9act.v1.0123456789abcdef0123456789abcdef",
@@ -1995,12 +1995,12 @@ class TemporalWorkerConfigurationTest {
                 OutcomeDispatchWorkflowImpl.class);
     }
 
-    private static TargetTemporalWorkerRegistration targetRegistration(
+    private static ProductionTemporalWorkerRegistration targetRegistration(
             CountingOutcomeActivities outcomeActivities) {
-        TargetTemporalWorkerRegistration.Registration registration =
-                new TargetTemporalWorkerRegistration.Registration(
-                        "target-e2e",
-                        "TARGET_E2E_CANDIDATE",
+        ProductionTemporalWorkerRegistration.Registration registration =
+                new ProductionTemporalWorkerRegistration.Registration(
+                        "production-runtime",
+                        "PRODUCTION",
                         "p9act.v1." + "a".repeat(32),
                         "test-build",
                         RecoveryTargetCaseProcessWorkflow.class,

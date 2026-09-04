@@ -20,7 +20,7 @@ alter table intake_parallel_proposal_artifact
     add constraint ck_intake_parallel_proposal_reference_v2
         check (
             artifact_id = 'intake.proposal.' || left(proposal_sha256, 32)
-            and artifact_uri = 'urn:target-e2e:proposal:intake:' || proposal_sha256
+            and artifact_uri = 'urn:production-runtime:proposal:intake:' || proposal_sha256
             and input_set_sha256 ~ '^[0-9a-f]{64}$'
             and proposal_sha256 ~ '^[0-9a-f]{64}$'
             and size_bytes between 2 and 65536
@@ -72,7 +72,7 @@ create table intake_parallel_graph_result_artifact (
     constraint ck_intake_parallel_graph_result_reference
         check (
             result_artifact_id = 'intake.graph-result.' || left(graph_result_sha256, 32)
-            and result_ref = 'urn:target-e2e:result:intake:' || graph_result_sha256
+            and result_ref = 'urn:production-runtime:result:intake:' || graph_result_sha256
             and input_set_sha256 ~ '^[0-9a-f]{64}$'
             and graph_result_sha256 ~ '^[0-9a-f]{64}$'
             and proposal_artifact_id = 'intake.proposal.' || left(proposal_sha256, 32)

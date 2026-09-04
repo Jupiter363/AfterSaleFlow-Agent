@@ -26,7 +26,7 @@ import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectio
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.Recovery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.TerminalProposal;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.VersionPins;
-import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
+import com.example.dispute.workflow.runtime.ingress.materialization.TargetIntakeRuntimePins;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -64,12 +64,12 @@ class EvidenceProcessProjectionAdapterTest {
             "b".repeat(64),
             "graph-code-p9",
             "d".repeat(64),
-            "all-rooms-agent.target-e2e.v1",
-           "all-rooms-prompt.target-e2e.v2",
-           "target-e2e.contract-blocked",
+            "all-rooms-agent.production-runtime.v1",
+           "all-rooms-prompt.production-runtime.v2",
+           "production-runtime.contract-blocked",
            "litellm",
-           "all-rooms-policy.target-e2e.v1",
-            "all-rooms-guardrail.target-e2e.v1",
+           "all-rooms-policy.production-runtime.v1",
+            "all-rooms-guardrail.production-runtime.v1",
             "tools.none.v1",
             "memory-p9",
             "envelope-key-p9");
@@ -110,9 +110,9 @@ class EvidenceProcessProjectionAdapterTest {
                                 "viewer.permission_scopes_json",
                                 "participant.participant_status = 'ACTIVE'",
                                 "epoch.room_type = 'EVIDENCE'",
-                                "target_e2e_room_epoch_binding target_binding",
-                                "target_e2e_case_reservation target_reservation",
-                                "target_e2e_activation target_activation",
+                                "production_runtime_room_epoch_binding target_binding",
+                                "production_runtime_case_reservation target_reservation",
+                                "production_runtime_activation target_activation",
                                 "run.room_type = 'EVIDENCE'",
                                 "run.stream_audience_json",
                                 "run.stream_audience_actor_ids_json",
@@ -231,7 +231,7 @@ class EvidenceProcessProjectionAdapterTest {
 
         assertThat(view.projectionState()).isEqualTo("AVAILABLE");
         assertThat(view.writerMode()).isEqualTo("TEMPORAL");
-        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(view.graphRuntimeMode()).isEqualTo("PRODUCTION");
         assertThat(view.roomPhase()).isEqualTo("OPEN");
         assertThat(view.pendingState()).isEqualTo("NONE");
         assertThat(view.activeGraphRun()).isNull();
@@ -550,7 +550,7 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.tenantSurrogate()).isEqualTo("tenant-run001");
         assertThat(view.caseId()).isEqualTo("QA_TARGET_0001");
         assertThat(view.writerMode()).isEqualTo("TEMPORAL");
-        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(view.graphRuntimeMode()).isEqualTo("PRODUCTION");
         assertThat(view.formalSinkAllowed()).isFalse();
         assertThat(view.temporalEvidenceAllocationAllowed()).isTrue();
         assertThat(view.realCaseShadowAllowed()).isFalse();
@@ -558,12 +558,12 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.versionPins())
                 .isEqualTo(VersionPins.target(
                         "control-build-p9",
-                        "target-e2e-graph.2026-08-18.1",
-                        "target-e2e-checkpoint.v2",
-                        "all-rooms-prompt.target-e2e.v2",
-                        "target-e2e.contract-blocked",
-                        "all-rooms-policy.target-e2e.v1",
-                        "all-rooms-guardrail.target-e2e.v1",
+                        "production-runtime-graph.2026-08-18.1",
+                        "production-runtime-checkpoint.v2",
+                        "all-rooms-prompt.production-runtime.v2",
+                        "production-runtime.contract-blocked",
+                        "all-rooms-policy.production-runtime.v1",
+                        "all-rooms-guardrail.production-runtime.v1",
                         "tools.none.v1"));
         assertSelfHash(view);
         assertFrozenSchemaValid(view);
@@ -596,7 +596,7 @@ class EvidenceProcessProjectionAdapterTest {
 
         assertThat(view.projectionState()).isEqualTo("AVAILABLE");
         assertThat(view.caseId()).isEqualTo(explicitCaseId);
-        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(view.graphRuntimeMode()).isEqualTo("PRODUCTION");
     }
 
     @Test
@@ -766,12 +766,12 @@ class EvidenceProcessProjectionAdapterTest {
 
         assertThatThrownBy(() -> VersionPins.target(
                         "control-build-p9",
-                        "target-e2e-graph.2026-08-18.1",
-                        "target-e2e-checkpoint.v2",
+                        "production-runtime-graph.2026-08-18.1",
+                        "production-runtime-checkpoint.v2",
                         "evidence-prompt.v2",
-                        "target-e2e.contract-blocked",
-                        "all-rooms-policy.target-e2e.v1",
-                        "all-rooms-guardrail.target-e2e.v1",
+                        "production-runtime.contract-blocked",
+                        "all-rooms-policy.production-runtime.v1",
+                        "all-rooms-guardrail.production-runtime.v1",
                         "tools.none.v1"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("target promptVersion");
@@ -1008,8 +1008,8 @@ class EvidenceProcessProjectionAdapterTest {
                         "ATTEMPT_P5_ONE_1",
                         "MANIFEST_P5_ONE",
                         "a".repeat(64),
-                        target ? "target-e2e-graph.2026-08-18.1" : "evidence.v2.0.0",
-                        target ? "target-e2e-checkpoint.v2" : "evidence-checkpoint.v2",
+                        target ? "production-runtime-graph.2026-08-18.1" : "evidence.v2.0.0",
+                        target ? "production-runtime-checkpoint.v2" : "evidence-checkpoint.v2",
                         "RUNNING")
                 : null;
         return new ProjectionRow(
@@ -1031,8 +1031,8 @@ class EvidenceProcessProjectionAdapterTest {
                 legacy ? null : 7L,
                 legacy ? null : 9L,
                 legacy ? null : target ? "control-build-p9" : "evidence-workflow.synthetic.v1",
-                legacy ? null : target ? "target-e2e-graph.2026-08-18.1" : "evidence.v2.0.0",
-                legacy ? null : target ? "target-e2e-checkpoint.v2" : "evidence-checkpoint.v2",
+                legacy ? null : target ? "production-runtime-graph.2026-08-18.1" : "evidence.v2.0.0",
+                legacy ? null : target ? "production-runtime-checkpoint.v2" : "evidence-checkpoint.v2",
                 targetAuthority,
                 activeRun,
                 graphRun,
@@ -1071,7 +1071,7 @@ class EvidenceProcessProjectionAdapterTest {
         return new TargetActivationAuthority(
                 "p9act.v1." + "a".repeat(32),
                 "c".repeat(64),
-                "TARGET_E2E_CANDIDATE",
+                "PRODUCTION",
                 tenantSurrogate,
                 tenantSurrogate,
                 caseId,
@@ -1087,9 +1087,9 @@ class EvidenceProcessProjectionAdapterTest {
                 "case-build-p9",
                 "control-build-p9",
                 "agent-build-p9",
-                "all-rooms.target-e2e.v2",
-                "target-e2e-graph.2026-08-18.1",
-                "target-e2e-checkpoint.v2",
+                "all-rooms.production-runtime.v2",
+                "production-runtime-graph.2026-08-18.1",
+                "production-runtime-checkpoint.v2",
                 "b".repeat(64),
                 "graph-code-p9",
                 "d".repeat(64),
@@ -1126,8 +1126,8 @@ class EvidenceProcessProjectionAdapterTest {
                 roomId == null ? null : roomRevision,
                 roomId == null ? null : fencingToken,
                 roomId == null ? null : "control-build-p9",
-                roomId == null ? null : "target-e2e-graph.2026-08-18.1",
-                roomId == null ? null : "target-e2e-checkpoint.v2",
+                roomId == null ? null : "production-runtime-graph.2026-08-18.1",
+                roomId == null ? null : "production-runtime-checkpoint.v2",
                 authority,
                 false,
                 null,

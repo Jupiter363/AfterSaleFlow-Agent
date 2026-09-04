@@ -1,11 +1,11 @@
 package com.example.dispute.workflow.temporal.caseprocess;
 
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
-import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import java.util.List;
 import java.util.Objects;

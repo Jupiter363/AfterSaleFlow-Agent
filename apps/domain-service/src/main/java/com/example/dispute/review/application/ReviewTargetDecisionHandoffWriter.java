@@ -14,8 +14,8 @@ import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
-import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewHumanDecisionReceipt;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewHumanDecisionReceipt;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochSelectionAuthority;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -32,10 +32,10 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public final class ReviewTargetDecisionHandoffWriter {
-    private static final String SCHEMA = "target-e2e-review-outcome-handoff.v1";
+    private static final String SCHEMA = "production-runtime-review-outcome-handoff.v1";
     private static final String EVENT_TYPE = "TARGET_REVIEW_OUTCOME_HANDOFF";
     private static final String ACTION_TYPE = "TARGET_NO_EXTERNAL_EFFECT";
-    private static final String EXECUTED_BY = "target-e2e-outcome-reservation";
+    private static final String EXECUTED_BY = "production-runtime-outcome-reservation";
 
     private final NotificationOutboxRepository outbox;
     private final ActionRecordRepository actions;

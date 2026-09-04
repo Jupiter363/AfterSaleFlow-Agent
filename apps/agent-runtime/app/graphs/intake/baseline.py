@@ -1,7 +1,7 @@
 """State-to-baseline adapters for the durable Intake graph.
 
 The model-facing contract in this module is deliberately the established Intake
-Harness contract.  Target-only proposal fields are derived only after the strict
+Harness contract.  Production-only proposal fields are derived only after the strict
 baseline response has been parsed and validated.
 """
 
@@ -1054,7 +1054,7 @@ def _statement_from_message(message: Mapping[str, Any]) -> dict[str, Any]:
             {
                 # Java's RoomTurnMemory transcript exposes turn identities as
                 # INTAKE_TURN_{turnNo}; the durable event sequence is the
-                # corresponding Target-only participant turn cursor.
+                # corresponding Production-only participant turn cursor.
                 "message_id": f"INTAKE_TURN_{sequence}",
                 "role": message.get("audience"),
                 "text": message.get("content"),

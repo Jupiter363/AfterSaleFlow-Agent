@@ -9,7 +9,7 @@ import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectio
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.Recovery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.TerminalProposal;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.VersionPins;
-import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
+import com.example.dispute.workflow.runtime.ingress.materialization.TargetIntakeRuntimePins;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.sql.ResultSet;
@@ -151,20 +151,20 @@ public class EvidenceProcessProjectionAdapter {
                       from authoritative_candidates candidate
                      where (select count(*) from authoritative_candidates) = 1
               ) epoch on true
-               left join target_e2e_room_epoch_binding target_binding
+               left join production_runtime_room_epoch_binding target_binding
                  on target_binding.epoch_id = epoch.id
                 and target_binding.tenant_surrogate = projection.tenant_surrogate
                 and target_binding.case_id = projection.case_id
                 and target_binding.room_type = 'EVIDENCE'
                 and target_binding.room_epoch = epoch.room_epoch
                 and target_binding.room_fencing_token = epoch.fencing_token
-               left join target_e2e_activation target_activation
+               left join production_runtime_activation target_activation
                  on target_activation.activation_id = target_binding.activation_id
                 and target_activation.manifest_hash = target_binding.activation_manifest_hash
                 and target_activation.execution_lane = target_binding.execution_lane
                 and target_activation.isolated_domain_db_binding_hash =
                     target_binding.isolated_domain_db_binding_hash
-               left join target_e2e_case_reservation target_reservation
+               left join production_runtime_case_reservation target_reservation
                  on target_reservation.activation_id = target_binding.activation_id
                 and target_reservation.tenant_surrogate = target_binding.tenant_surrogate
                 and target_reservation.case_id = target_binding.case_id
@@ -505,7 +505,7 @@ public class EvidenceProcessProjectionAdapter {
 
     private static String graphRuntimeMode(ProjectionRow row) {
         return "TEMPORAL".equals(normalized(row.writerMode()))
-                ? "TARGET_E2E_CANDIDATE"
+                ? "PRODUCTION"
                 : "SIGNED_SYNTHETIC_SHADOW";
     }
 
@@ -618,7 +618,7 @@ public class EvidenceProcessProjectionAdapter {
                 || row.caseId().isBlank()
                 || row.roomId() == null
                 || authority == null
-                || !"TARGET_E2E_CANDIDATE".equals(authority.executionLane())
+                || !"PRODUCTION".equals(authority.executionLane())
                 || !row.tenantSurrogate().equals(authority.tenantSurrogate())
                 || !row.tenantSurrogate().equals(authority.activationTenantSurrogate())
                 || !row.caseId().equals(authority.caseId())

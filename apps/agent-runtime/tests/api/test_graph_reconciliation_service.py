@@ -22,10 +22,10 @@ from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdenti
 from app.graph_runtime.ledger import CommandBinding, CommandRecord, CommandStatus, ResultRecord
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
-from app.graph_runtime.target_e2e import (
-    TargetE2ERoomProposalSource,
-    VerifiedTargetE2EInvocation,
-    build_target_e2e_result_envelope,
+from app.graph_runtime.production_runtime import (
+    ProductionRoomProposalSource,
+    VerifiedProductionInvocation,
+    build_production_runtime_result_envelope,
 )
 from app.security.invocation_envelope import VerifiedReconciliation
 
@@ -190,21 +190,21 @@ async def _service(
     )
 
 
-def _candidate_result() -> tuple[ResultRecord, TargetE2ERoomProposalSource]:
+def _candidate_result() -> tuple[ResultRecord, ProductionRoomProposalSource]:
     base = _reconciliation().result
     nested = RoomGraphResult.model_validate(base.result_json)
-    proposal_source = TargetE2ERoomProposalSource.model_validate(
+    proposal_source = ProductionRoomProposalSource.model_validate(
         {
-            "schema_version": "target-e2e-room-proposal-source.v1",
+            "schema_version": "production-runtime-room-proposal-source.v1",
             "room_type": "INTAKE",
             "proposal": {
-                "schema_version": "target-e2e-intake-proposal.v1",
+                "schema_version": "production-runtime-intake-proposal.v1",
                 "proposal_id": "proposal-target-001",
                 "command_id": nested.command_id,
                 "logical_run_id": nested.logical_run_id,
                 "attempt_id": nested.attempt_id,
                 "payload_schema_version": "intake-turn-proposal.v2",
-                "payload_ref": "urn:target-e2e:proposal:intake:001",
+                "payload_ref": "urn:production-runtime:proposal:intake:001",
                 "payload_hash": "7" * 64,
                 "terminal_class": nested.status,
                 "formal_authority": False,
@@ -214,20 +214,20 @@ def _candidate_result() -> tuple[ResultRecord, TargetE2ERoomProposalSource]:
     activation_id = f"p9act.v1.{'a' * 32}"
     command_hash = "b" * 64
     command_envelope_hash = "c" * 64
-    envelope = build_target_e2e_result_envelope(
+    envelope = build_production_runtime_result_envelope(
         nested,
         activation_id=activation_id,
         room_fencing_token=19,
         command_hash=command_hash,
         command_envelope_hash=command_envelope_hash,
-        execution_provider="target-e2e-composite",
+        execution_provider="production-runtime-composite",
         execution_model="room-provider-dispatch",
         proposal_hash=proposal_source.proposal_hash,
     )
     return (
         replace(
             base,
-            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            execution_lane=GraphGatewayMode.PRODUCTION,
             activation_id=activation_id,
             room_fencing_token=19,
             command_hash=command_hash,
@@ -241,8 +241,8 @@ def _candidate_result() -> tuple[ResultRecord, TargetE2ERoomProposalSource]:
     )
 
 
-def _verified_candidate(result: ResultRecord) -> VerifiedTargetE2EInvocation:
-    return VerifiedTargetE2EInvocation(
+def _verified_candidate(result: ResultRecord) -> VerifiedProductionInvocation:
+    return VerifiedProductionInvocation(
         claims=cast(Any, object()),
         key_id="target-key-1",
         request_hash=result.request_hash,
@@ -266,7 +266,7 @@ async def test_target_proposal_source_requires_exact_durable_candidate_selectors
     verified = _verified_candidate(result)
     thread = _thread(command)
 
-    actual = await service.retrieve_target_e2e_proposal_source(
+    actual = await service.retrieve_production_runtime_proposal_source(
         command=command,
         verified_invocation=verified,
         expected_thread=thread,
@@ -302,7 +302,7 @@ async def test_target_proposal_source_rejects_selector_mismatch_without_returnin
     service, gate = await _service(gateway)
 
     with pytest.raises(GraphTerminalBindingError, match="selector differs"):
-        await service.retrieve_target_e2e_proposal_source(
+        await service.retrieve_production_runtime_proposal_source(
             command=_command(),
             verified_invocation=_verified_candidate(result),
             expected_thread=_thread(_command()),
@@ -324,7 +324,7 @@ async def test_target_proposal_source_rejects_invalid_persisted_source() -> None
     service, gate = await _service(gateway)
 
     with pytest.raises(GraphTerminalBindingError, match="missing or invalid"):
-        await service.retrieve_target_e2e_proposal_source(
+        await service.retrieve_production_runtime_proposal_source(
             command=_command(),
             verified_invocation=_verified_candidate(result),
             expected_thread=_thread(_command()),

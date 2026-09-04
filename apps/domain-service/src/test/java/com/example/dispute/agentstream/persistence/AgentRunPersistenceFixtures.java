@@ -317,9 +317,9 @@ public final class AgentRunPersistenceFixtures {
                 "ROOM_PERSISTENCE_INTAKE",
                 RoomType.INTAKE,
                 2,
-                "all-rooms.target-e2e.v2",
-                "target-e2e-graph.2026-08-18.1",
-                "target-e2e-checkpoint.v2",
+                "all-rooms.production-runtime.v2",
+                "production-runtime-graph.2026-08-18.1",
+                "production-runtime-checkpoint.v2",
                 "thread-persistence",
                 new RoomGraphCommand.ActorScope(
                         "user-persistence",

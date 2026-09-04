@@ -67,12 +67,12 @@ class IntakeGraphResultFinalizerTest {
     void targetOuterToolPolicyMapsOnlyTheProposalLoaderAuthority() throws Exception {
         Fixture fixture = fixture(
                 WriterMode.TEMPORAL,
-                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY,
                 "tools.none.v1");
         RecordingCommitPort port = new RecordingCommitPort();
 
         IntakeFinalizationReceipt receipt = finalizer(
-                        fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                        fixture, port, IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY)
                 .finalizeResult(fixture.request());
 
         assertThat(receipt.operationKey()).isEqualTo(fixture.request().operationKey());
@@ -87,7 +87,7 @@ class IntakeGraphResultFinalizerTest {
         Fixture fixture = parallelFixture("tools.none.v1");
         RecordingCommitPort port = new RecordingCommitPort();
         IntakeGraphResultFinalizer finalizer = finalizer(
-                fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY);
+                fixture, port, IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY);
 
         IntakeFinalizationReceipt first = finalizer.finalizeResult(fixture.request());
         IntakeFinalizationReceipt replay = finalizer.finalizeResult(fixture.request());
@@ -105,7 +105,7 @@ class IntakeGraphResultFinalizerTest {
 
         assertRejected(
                 "INTAKE_PROPOSAL_AUTHORITY_MISMATCH",
-                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY)
                         .finalizeResult(fixture.request()));
         assertThat(port.calls).isZero();
     }
@@ -114,13 +114,13 @@ class IntakeGraphResultFinalizerTest {
     void targetRejectsAnUnexpectedOuterToolPolicyBeforePreflight() throws Exception {
         Fixture fixture = fixture(
                 WriterMode.TEMPORAL,
-                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY,
                 "unexpected-tools.v1");
         RecordingCommitPort port = new RecordingCommitPort();
 
         assertRejected(
                 "INTAKE_AUTHORITY_MISMATCH",
-                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY)
                         .finalizeResult(fixture.request()));
         assertThat(port.preflightCalls).isZero();
         assertThat(port.calls).isZero();
@@ -130,7 +130,7 @@ class IntakeGraphResultFinalizerTest {
     void targetToolPolicyMappingDoesNotRelaxOtherAuthorityProfiles() throws Exception {
         Fixture fixture = fixture(
                 WriterMode.TEMPORAL,
-                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY,
                 "tools.none.v1");
         IntakeGraphFinalizationRequest.Authority authority = fixture.authority();
         IntakeTurnProposal.ProfileVersions profiles = authority.profileVersions();
@@ -168,7 +168,7 @@ class IntakeGraphResultFinalizerTest {
         assertRejected(
                 "INTAKE_AUTHORITY_MISMATCH",
                 () -> finalizer(fixture.withRequest(mismatched), port,
-                                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                                IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY)
                         .finalizeResult(mismatched));
         assertThat(port.preflightCalls).isZero();
         assertThat(port.calls).isZero();
@@ -478,7 +478,7 @@ class IntakeGraphResultFinalizerTest {
     private static Fixture parallelFixture(String proposalToolPolicyVersion) throws Exception {
         return fixture(
                 WriterMode.TEMPORAL,
-                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY,
                 "tools.none.v1",
                 true,
                 proposalToolPolicyVersion);
@@ -493,10 +493,10 @@ class IntakeGraphResultFinalizerTest {
         IntakeGraphThreadBinding binding =
                 binding(writerMode, graphKey, outerToolPolicyVersion);
         JsonNode document = MAPPER.readTree(PROPOSAL_FIXTURE.toFile());
-        if (IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(graphKey)) {
+        if (IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY.equals(graphKey)) {
             ObjectNode profiles = (ObjectNode) document.required("profile_versions");
-            profiles.put("graph_version", "target-e2e-graph.2026-08-18.1");
-            profiles.put("checkpoint_schema_version", "target-e2e-checkpoint.v2");
+            profiles.put("graph_version", "production-runtime-graph.2026-08-18.1");
+            profiles.put("checkpoint_schema_version", "production-runtime-checkpoint.v2");
             profiles.put("tool_policy_version", proposalToolPolicyVersion);
             ((ObjectNode) document)
                     .put("actor_scope_hash", binding.registration().actorScopeHash());
@@ -599,7 +599,7 @@ class IntakeGraphResultFinalizerTest {
 
     private static IntakeGraphThreadBinding binding(
             WriterMode writerMode, String graphKey, String toolPolicyVersion) {
-        boolean targetGraph = IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(graphKey);
+        boolean targetGraph = IntakeGraphResultFinalizer.PRODUCTION_RUNTIME_GRAPH_KEY.equals(graphKey);
         var actor = new IntakePrivateThreadRegistration.ActorScope(
                 "user-synthetic",
                 ActorRole.USER,
@@ -618,8 +618,8 @@ class IntakeGraphResultFinalizerTest {
                         "AGENT_SESSION_P4_USER_1",
                         new IntakePrivateThreadRegistrationFactory.VersionPins(
                                 graphKey,
-                                targetGraph ? "target-e2e-graph.2026-08-18.1" : "2.0.0",
-                                targetGraph ? "target-e2e-checkpoint.v2" : "intake-checkpoint.v2",
+                                targetGraph ? "production-runtime-graph.2026-08-18.1" : "2.0.0",
+                                targetGraph ? "production-runtime-checkpoint.v2" : "intake-checkpoint.v2",
                                 "intake-graph-state.v2",
                                 "intake-prompt.v2",
                                 "intake-model.synthetic.v1",

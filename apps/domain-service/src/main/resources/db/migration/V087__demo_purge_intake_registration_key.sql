@@ -42,7 +42,7 @@ begin
     elsif p_row ? 'admission_id' then
         select admission.case_id
         into resolved_case_id
-        from target_e2e_command_admission admission
+        from production_runtime_command_admission admission
         where admission.admission_id = p_row ->> 'admission_id';
     end if;
 

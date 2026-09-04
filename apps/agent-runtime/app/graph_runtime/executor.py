@@ -1,4 +1,4 @@
-"""Explicit target-E2E executor assembly without process-global security state."""
+"""Explicit production-runtime executor assembly without process-global security state."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from typing import TYPE_CHECKING
 from app.agents.hearing_flow import HearingFlowWorkflows
 from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.evidence_turn_executor import EvidenceTurnWorkflowPort
-from app.graph_runtime.target_e2e_composite import TargetE2ERoomProvider
-from app.graph_runtime.target_e2e_room_adapters import (
-    TargetE2EHearingInvocationDecoder,
-    TargetE2ESpecializedRoomDependencies,
-    build_target_e2e_specialized_room_providers,
+from app.graph_runtime.production_runtime_composite import ProductionRoomProvider
+from app.graph_runtime.production_runtime_room_adapters import (
+    ProductionHearingInvocationDecoder,
+    ProductionSpecializedRoomDependencies,
+    build_production_runtime_specialized_room_providers,
 )
-from app.graph_runtime.target_e2e_room_exchange import (
-    GovernedTargetE2EHearingInvocationDecoder,
-    JavaTargetE2ERoomExchange,
+from app.graph_runtime.production_runtime_room_exchange import (
+    GovernedProductionHearingInvocationDecoder,
+    JavaProductionRoomExchange,
 )
 from app.security.graph_runtime import GraphSecurityRuntime
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class TargetE2ESpecializedRoomProviderFactory:
+class ProductionSpecializedRoomProviderFactory:
     """Build non-Intake providers from lifecycle-owned trusted dependencies.
 
     The lifecycle opens the JWKS-backed ``GraphSecurityRuntime`` before it
@@ -35,52 +35,52 @@ class TargetE2ESpecializedRoomProviderFactory:
     """
 
     security_runtime: GraphSecurityRuntime
-    room_exchange: JavaTargetE2ERoomExchange
-    hearing_decoder: TargetE2EHearingInvocationDecoder | None = None
+    room_exchange: JavaProductionRoomExchange
+    hearing_decoder: ProductionHearingInvocationDecoder | None = None
     evidence_workflow: EvidenceTurnWorkflowPort | None = None
 
     def with_evidence_workflow(
         self,
         workflow: EvidenceTurnWorkflowPort,
-    ) -> TargetE2ESpecializedRoomProviderFactory:
+    ) -> ProductionSpecializedRoomProviderFactory:
         if (
             not callable(getattr(workflow, "run", None))
             or not callable(getattr(workflow, "arun", None))
             or getattr(workflow, "protocol_version", None)
             != "evidence-turn-result.v3"
         ):
-            raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
+            raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         return replace(self, evidence_workflow=workflow)
 
     def with_hearing_workflow(
         self,
         workflow: HearingFlowWorkflows,
-    ) -> TargetE2ESpecializedRoomProviderFactory:
-        if not callable(getattr(workflow, "target_e2e_invocation", None)):
-            raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")
+    ) -> ProductionSpecializedRoomProviderFactory:
+        if not callable(getattr(workflow, "production_runtime_invocation", None)):
+            raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_HEARING_WORKFLOW_REQUIRED")
         return replace(
             self,
-            hearing_decoder=GovernedTargetE2EHearingInvocationDecoder(workflow),
+            hearing_decoder=GovernedProductionHearingInvocationDecoder(workflow),
         )
 
-    def __call__(self, kernel: GraphExecutorKernel) -> Iterable[TargetE2ERoomProvider]:
+    def __call__(self, kernel: GraphExecutorKernel) -> Iterable[ProductionRoomProvider]:
         if type(self.security_runtime) is not GraphSecurityRuntime:
-            raise GraphContractError("TARGET_E2E_GRAPH_SECURITY_RUNTIME_REQUIRED")
+            raise GraphContractError("PRODUCTION_RUNTIME_GRAPH_SECURITY_RUNTIME_REQUIRED")
         if not callable(getattr(self.room_exchange, "for_execution", None)):
-            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_REQUIRED")
+            raise GraphContractError("PRODUCTION_RUNTIME_ROOM_EXCHANGE_REQUIRED")
         if (
             not callable(getattr(self.evidence_workflow, "run", None))
             or not callable(getattr(self.evidence_workflow, "arun", None))
             or getattr(self.evidence_workflow, "protocol_version", None)
             != "evidence-turn-result.v3"
         ):
-            raise GraphContractError("TARGET_E2E_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
+            raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_EVIDENCE_WORKFLOW_REQUIRED")
         if self.hearing_decoder is None:
-            raise GraphContractError("TARGET_E2E_FORMAL_HEARING_WORKFLOW_REQUIRED")
-        return build_target_e2e_specialized_room_providers(
+            raise GraphContractError("PRODUCTION_RUNTIME_FORMAL_HEARING_WORKFLOW_REQUIRED")
+        return build_production_runtime_specialized_room_providers(
             saver=kernel.saver,
             bulkhead=kernel.durable_bulkhead,
-            dependencies=TargetE2ESpecializedRoomDependencies(
+            dependencies=ProductionSpecializedRoomDependencies(
                 object_store=None,
                 object_store_factory=self.room_exchange,
                 evidence_workflow=self.evidence_workflow,
@@ -89,4 +89,4 @@ class TargetE2ESpecializedRoomProviderFactory:
         )
 
 
-__all__ = ["TargetE2ESpecializedRoomProviderFactory"]
+__all__ = ["ProductionSpecializedRoomProviderFactory"]

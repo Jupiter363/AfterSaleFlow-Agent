@@ -51,11 +51,11 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import java.time.Clock;

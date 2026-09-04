@@ -19,8 +19,8 @@ import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
-import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTerminalActivities;
-import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.runtime.rooms.evidence.TargetEvidenceTerminalActivities;
+import com.example.dispute.workflow.runtime.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
@@ -243,7 +243,7 @@ class EvidenceRoomWorkflowReplayTest {
         controlWorker.registerActivitiesImplementations(
             (TargetEvidenceTerminalActivities)
                 request -> {
-                  if (!request.start().targetE2eCandidate()) {
+                  if (!request.start().productionCandidate()) {
                     throw new IllegalStateException("terminal Activity received a non-target start");
                   }
                   if (!workflowId.equals(request.workflowId())
@@ -347,7 +347,7 @@ class EvidenceRoomWorkflowReplayTest {
         controlWorker.registerActivitiesImplementations(
             (TargetEvidenceTerminalActivities)
                 request -> {
-                  assertThat(request.start().targetE2eCandidate()).isTrue();
+                  assertThat(request.start().productionCandidate()).isTrue();
                   assertThat(request.workflowId()).isEqualTo(workflowId);
                   assertThat(request.workflowRunId()).isNotBlank();
                   assertThat(request.durableWorkflowRunId()).isNull();
@@ -658,14 +658,14 @@ class EvidenceRoomWorkflowReplayTest {
         2,
         3,
         "local-d96956b7-control",
-        ExecutionLane.TARGET_E2E_CANDIDATE);
+        ExecutionLane.PRODUCTION);
   }
 
   private static Map<String, Object> legacyTargetV1StartPayload(
       Instant openedAt, Duration window) {
     Map<String, Object> payload =
         new java.util.LinkedHashMap<>(legacyV1StartPayload(openedAt, window));
-    payload.put("workflowBuildId", "target-e2e-control.v0");
+    payload.put("workflowBuildId", "production-runtime-control.v0");
     return Map.copyOf(payload);
   }
 
@@ -821,7 +821,7 @@ class EvidenceRoomWorkflowReplayTest {
       }
 
       TargetEvidenceTerminalActivities.TerminalRequest terminalRequest;
-      if (start.targetE2eCandidate()) {
+      if (start.productionCandidate()) {
         Workflow.getVersion(
             "evidence-explicit-target-terminal-lane", Workflow.DEFAULT_VERSION, 1);
         Workflow.getVersion(

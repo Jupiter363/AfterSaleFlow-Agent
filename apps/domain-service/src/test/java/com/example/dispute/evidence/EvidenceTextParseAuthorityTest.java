@@ -36,9 +36,9 @@ import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
-import com.example.dispute.workflow.targete2e.exchange.rooms.TargetE2eRoomObjectIndex;
-import com.example.dispute.workflow.targete2e.ingress.rooms.MinioTargetE2eRoomCommandPayloadPublisher;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eEvidenceTurnInvocationPublisher;
+import com.example.dispute.workflow.runtime.exchange.rooms.ProductionRoomObjectIndex;
+import com.example.dispute.workflow.runtime.ingress.rooms.MinioProductionRoomCommandPayloadPublisher;
+import com.example.dispute.workflow.runtime.ingress.rooms.ProductionEvidenceTurnInvocationPublisher;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
@@ -133,7 +133,7 @@ class EvidenceTextParseAuthorityTest {
                         })
                 .when(minio)
                 .putObject(any(PutObjectArgs.class));
-        TargetE2eRoomObjectIndex index = mock(TargetE2eRoomObjectIndex.class);
+        ProductionRoomObjectIndex index = mock(ProductionRoomObjectIndex.class);
         EvidenceContentAuthorityLookup lookup =
                 (caseId, evidenceId, fileSha256, contentType, fileSize, parserVersion) ->
                         exactStoredAuthority(
@@ -149,10 +149,10 @@ class EvidenceTextParseAuthorityTest {
                                         new EvidenceContentAuthorityLookup.StoredAuthority(
                                                 authority, rawBytes.length))
                                 : Optional.empty();
-        TargetE2eEvidenceTurnInvocationPublisher subject =
-                new TargetE2eEvidenceTurnInvocationPublisher(
-                        new MinioTargetE2eRoomCommandPayloadPublisher(
-                                minio, MAPPER, "target-e2e", "room-command-inputs", index),
+        ProductionEvidenceTurnInvocationPublisher subject =
+                new ProductionEvidenceTurnInvocationPublisher(
+                        new MinioProductionRoomCommandPayloadPublisher(
+                                minio, MAPPER, "production-runtime", "room-command-inputs", index),
                         index,
                         MAPPER,
                         lookup);
@@ -206,7 +206,7 @@ class EvidenceTextParseAuthorityTest {
         verify(minio, never()).putObject(any(PutObjectArgs.class));
         verifyNoInteractions(index);
 
-        TargetE2eEvidenceTurnInvocationPublisher.Published first =
+        ProductionEvidenceTurnInvocationPublisher.Published first =
                 subject.publish(
                         command(),
                         7L,
@@ -217,7 +217,7 @@ class EvidenceTextParseAuthorityTest {
                 invocation.at(
                         "/evidence_turn_request/context_envelope/evidence_content_authorities/0");
         assertThat(invocation.path("schema_version").asText())
-                .isEqualTo(TargetE2eEvidenceTurnInvocationPublisher.SCHEMA_VERSION);
+                .isEqualTo(ProductionEvidenceTurnInvocationPublisher.SCHEMA_VERSION);
         assertThat(invocation.has("evidence_content_authorities")).isFalse();
         assertThat(nestedAuthority.path("schema_version").asText())
                 .isEqualTo("evidence_content_authority.v1");
@@ -225,7 +225,7 @@ class EvidenceTextParseAuthorityTest {
         assertThat(nestedAuthority.path("parsed_text").asText()).isEqualTo(CANONICAL_MARKDOWN);
         assertThat(nestedAuthority.path("parsed_content_sha256").asText())
                 .isEqualTo(authority.parsedContentSha256());
-        TargetE2eEvidenceTurnInvocationPublisher.Published replay =
+        ProductionEvidenceTurnInvocationPublisher.Published replay =
                 subject.publish(
                         command(),
                         7L,
@@ -236,7 +236,7 @@ class EvidenceTextParseAuthorityTest {
         assertThat(publishedBodies).hasSize(2);
         assertThat(publishedBodies.get(1)).isEqualTo(publishedBodies.getFirst());
 
-        TargetE2eEvidenceTurnInvocationPublisher.Published unsupportedReplay =
+        ProductionEvidenceTurnInvocationPublisher.Published unsupportedReplay =
                 subject.publish(
                         command(),
                         7L,
@@ -302,8 +302,8 @@ class EvidenceTextParseAuthorityTest {
                 CASE_ID,
                 com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
                 0L,
-                "target-e2e-room-graph",
-                "target-e2e-room-graph.v1",
+                "production-runtime-room-graph",
+                "production-runtime-room-graph.v1",
                 "checkpoint.v1",
                 "grt.v1.11111111111111111111111111111111",
                 new RoomGraphCommand.ActorScope(
@@ -316,7 +316,7 @@ class EvidenceTextParseAuthorityTest {
                 1L,
                 new RoomGraphCommand.SnapshotRef(
                         "placeholder",
-                        "target-e2e-evidence-turn-invocation.v2",
+                        "production-runtime-evidence-turn-invocation.v2",
                         "urn:placeholder",
                         "0".repeat(64),
                         1L),

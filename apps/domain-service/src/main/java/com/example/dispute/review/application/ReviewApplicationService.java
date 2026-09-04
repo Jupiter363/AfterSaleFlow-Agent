@@ -50,11 +50,11 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
-import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
-import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewHumanDecisionReceipt;
-import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFrozenExecutionContract;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewHumanDecisionReceipt;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewFrozenExecutionContract;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ApprovalPolicyEngine;
 import com.example.dispute.review.domain.ApprovalPolicyInput;
@@ -566,8 +566,8 @@ public class ReviewApplicationService {
                 task.getCaseId(), target.epoch().getRoomId(), "TARGET_REVIEW_DECISION_COMMITTED",
                 frozenDecision, "target-review-decision:" + record.getId(), actor.actorId());
         PayloadRef payloadRef = new PayloadRef(
-                "target-e2e-review-human-decision-event.v1",
-                "urn:target-e2e:review-decision:" + event.getId(),
+                "production-runtime-review-human-decision-event.v1",
+                "urn:production-runtime:review-decision:" + event.getId(),
                 frozenHash,
                 ContractJson.canonicalize(frozenNode).length);
 
@@ -651,7 +651,7 @@ public class ReviewApplicationService {
                 TargetReviewFrozenExecutionContract.fromFrozenPacket(
                         packet, objectMapper, target.epoch().getRoomRevision());
         Map<String, Object> value = new TreeMap<>();
-        value.put("schema_version", "target-e2e-review-human-decision-event.v1");
+        value.put("schema_version", "production-runtime-review-human-decision-event.v1");
         value.put("approval_record_id", record.getId());
         value.put("approval_hash", record.getApprovalHash());
         value.put("approved_plan", read(record.getApprovedPlanJson()));

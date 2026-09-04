@@ -22,9 +22,9 @@ import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochBootstrapE
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
-import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
-import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter;
+import com.example.dispute.workflow.runtime.temporal.TargetRoomEpochBindingWriter.BindingContext;
+import com.example.dispute.workflow.runtime.temporal.TargetTypedRoomProtocol;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -1048,7 +1048,7 @@ class RoomEpochAllocatorIntegrationTest {
             return new TargetActivationBinding(
                     "p9act.v1.0123456789abcdef0123456789abcdef",
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "TARGET_E2E_CANDIDATE",
+                    "PRODUCTION",
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         }
     }

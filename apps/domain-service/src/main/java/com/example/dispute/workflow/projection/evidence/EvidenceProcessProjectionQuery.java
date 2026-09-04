@@ -50,7 +50,7 @@ public class EvidenceProcessProjectionQuery {
                 row.targetAuthority();
         return "TEMPORAL".equals(row.writerMode())
                 && authority != null
-                && "TARGET_E2E_CANDIDATE".equals(authority.executionLane());
+                && "PRODUCTION".equals(authority.executionLane());
     }
 
     /**

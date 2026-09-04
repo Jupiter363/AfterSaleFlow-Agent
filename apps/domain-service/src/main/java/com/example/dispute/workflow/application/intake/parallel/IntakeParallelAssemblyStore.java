@@ -212,7 +212,7 @@ public interface IntakeParallelAssemblyStore {
             if (!expectedProposalId.equals(proposalArtifactId)) {
                 throw new IllegalArgumentException("proposalArtifactId is not content addressed");
             }
-            String expectedProposalUri = "urn:target-e2e:proposal:intake:" + proposalSha256;
+            String expectedProposalUri = "urn:production-runtime:proposal:intake:" + proposalSha256;
             if (!expectedProposalUri.equals(proposalUri)) {
                 throw new IllegalArgumentException("proposalUri is not canonical");
             }
@@ -224,7 +224,7 @@ public interface IntakeParallelAssemblyStore {
             if (!expectedResultId.equals(resultArtifactId)) {
                 throw new IllegalArgumentException("resultArtifactId is not content addressed");
             }
-            String expectedResultRef = "urn:target-e2e:result:intake:" + graphResultSha256;
+            String expectedResultRef = "urn:production-runtime:result:intake:" + graphResultSha256;
             if (!expectedResultRef.equals(resultRef)) {
                 throw new IllegalArgumentException("resultRef is not canonical");
             }

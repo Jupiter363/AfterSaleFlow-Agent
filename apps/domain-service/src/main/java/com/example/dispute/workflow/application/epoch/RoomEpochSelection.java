@@ -127,9 +127,9 @@ public record RoomEpochSelection(
                 throw new IllegalArgumentException("activationId is invalid");
             }
             requireHash(activationManifestHash, "activationManifestHash");
-            if (!"TARGET_E2E_CANDIDATE".equals(executionLane)) {
+            if (!"PRODUCTION".equals(executionLane)) {
                 throw new IllegalArgumentException(
-                        "executionLane must be TARGET_E2E_CANDIDATE");
+                        "executionLane must be PRODUCTION");
             }
             requireHash(isolatedDomainDbBindingHash, "isolatedDomainDbBindingHash");
         }
