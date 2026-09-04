@@ -21,18 +21,6 @@ public interface GraphCommandHttpTransport {
         return GraphTransportSecurityProof.unverified();
     }
 
-    /**
-     * Legacy diagnostic projection. Production assembly must consume the factory bundle/proof.
-     */
-    @Deprecated(forRemoval = true)
-    default TransportSecurity transportSecurity() {
-        return switch (transportProof().mode()) {
-            case MUTUAL_TLS -> TransportSecurity.MUTUAL_TLS;
-            case LOCAL_PLAINTEXT -> TransportSecurity.LOCAL_PLAINTEXT;
-            case UNVERIFIED -> TransportSecurity.UNVERIFIED;
-        };
-    }
-
     void stream(
             Request request,
             AgentRunCancellationToken cancellationToken,
@@ -101,12 +89,5 @@ public interface GraphCommandHttpTransport {
         void onResponse(ResponseHead response);
 
         void onLine(String line);
-    }
-
-    @Deprecated(forRemoval = true)
-    enum TransportSecurity {
-        UNVERIFIED,
-        MUTUAL_TLS,
-        LOCAL_PLAINTEXT
     }
 }

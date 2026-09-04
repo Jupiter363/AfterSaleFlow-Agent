@@ -18,7 +18,7 @@ public final class AgentExecutionException extends BusinessException {
 
     // 所属模块：【后端公共边界 / 核心业务层】「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」。
     // 具体功能：「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」：把 「errorCode」(ErrorCode)、「message」(String)、「details」(Map) 交给父异常保存错误链；构造过程不执行日志、重试或业务补偿。
-    // 上游调用：「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」的上游创建点包括 「RestClientExternalDisputeSimulationClient.simulate」、「RestClientAgentServiceClient.analyze」、「RestClientEvaluationAgentClient.analyze」、「EvidenceAgentTurnService.safeRun」。
+    // 上游调用：「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」的上游创建点包括 「RestClientAgentServiceClient.analyze」、「RestClientEvaluationAgentClient.analyze」、「EvidenceAgentTurnService.safeRun」。
     // 下游影响：「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「AgentExecutionException.AgentExecutionException(ErrorCode,String,Map)」负责主链路中的“Agent执行异常”；公共组件不得暗含具体案件裁决规则
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。

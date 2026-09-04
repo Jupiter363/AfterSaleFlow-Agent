@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.api.final_agents import FinalAgentServices
+from app.business.api.final_agents import FinalAgentServices
 from app.config import Settings
 from app.main import create_app
 from app.schemas import (

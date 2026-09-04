@@ -2492,40 +2492,6 @@ def test_evidence_context_assembler_prioritizes_current_attachments_and_budgets(
     assert len(assembled.raw_envelope.visible_evidence[0].parsed_text or "") > 20_000
 
 
-# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
-# 具体功能：`legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnRequest.model_validate`、`assemble`、`draft`。
-# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`、`_visible_signature_evidence`。
-# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
-def legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items() -> None:
-    from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
-    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
-    from app.harness.evidence_context_assembler import EvidenceContextAssembler
-    from app.schemas import EvidenceTurnRequest
-
-    payload = _evidence_turn_payload()
-    items = []
-    for index in range(125):
-        item = dict(_visible_signature_evidence())
-        item["evidence_id"] = f"EVIDENCE_scale_{index:03d}"
-        item["file_hash"] = f"sha256-scale-{index:03d}"
-        item["parsed_text"] = f"第 {index} 份证据解析文本。"
-        item["submitted_at"] = f"2026-07-11T{index // 60:02d}:{index % 60:02d}:00+08:00"
-        items.append(item)
-    payload["context_envelope"]["visible_evidence"] = items
-    request = EvidenceTurnRequest.model_validate(payload)
-    assembled = EvidenceContextAssembler().assemble(request)
-
-    draft = EvidenceAuthenticitySkill().draft(assembled.working_set)
-    result = EvidenceTurnWorkflow().run(request)
-
-    assert len(draft.evidence_requests) == 10
-    assert len(draft.verification_suggestions) == 100
-    assert len(draft.authenticity_flags) <= 20
-    assert len(result.evidence_requests) <= 10
-    assert len(result.verification_suggestions) == 20
-    assert len(result.authenticity_flags) <= 20
-
-
 # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
 # 具体功能：`test_evidence_context_assembler_uses_raw_case_when_intake_dossier_is_missing` 把上游材料组装为本阶段可消费的案件卷宗；关键协作调用：`assemble`、`EvidenceTurnRequest.model_validate`、`EvidenceContextAssembler`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`。

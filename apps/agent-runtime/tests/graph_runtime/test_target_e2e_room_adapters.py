@@ -16,7 +16,7 @@ from app.graph_runtime.target_e2e_room_adapters import (
     TargetE2EIntakeProvider,
     TargetE2EObjectEvidenceAssetLoader,
 )
-from app.graph_runtime.target_e2e_fixture_transport import (
+from test_support.target_e2e_fixture_transport import (
     TARGET_E2E_FIXTURE_MODEL,
     TARGET_E2E_FIXTURE_PROVIDER,
     TargetE2EDeterministicFixtureTransport,

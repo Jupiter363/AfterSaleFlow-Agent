@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.evaluation import EvaluationWorkflow
 from app.llm import StructuredGeneration
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
     EvaluationAgentOutput,
     EvaluationAnalyzeRequest,

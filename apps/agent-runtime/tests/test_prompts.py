@@ -1,6 +1,6 @@
 # 文件作用：自动化测试文件，验证 test_prompts 相关模块的行为、契约或页面布局。
 
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 
 
 # 所属模块：Python 支撑模块 > test_prompts；函数角色：回归测试用例。
