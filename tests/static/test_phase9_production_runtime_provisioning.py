@@ -192,6 +192,15 @@ def test_all_java_roles_use_the_target_artifact_and_control_mounts_activation_ma
     ) in agent
 
 
+def test_production_runtime_image_contains_only_the_deployable_java_archive() -> None:
+    dockerfile = (ROOT / "apps/domain-service/Dockerfile.production-runtime").read_text(
+        encoding="utf-8"
+    )
+
+    assert "app-production-runtime.jar" in dockerfile
+    assert "app-main.jar" not in dockerfile
+
+
 def test_fixture_hash_uses_the_actual_canonical_fixture_bytes(tmp_path: Path) -> None:
     document, canonical, digest = provision._canonical_fixture(
         provision.SYNTHETIC_FIXTURE_SOURCE

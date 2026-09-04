@@ -22,7 +22,6 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPSHOT.jar /home/app/app-main.jar
 COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPSHOT-production-runtime.jar /home/app/app-production-runtime.jar
 
 ENV SPRING_PROFILES_ACTIVE=production-runtime,agent-worker \

@@ -29,12 +29,13 @@ import org.springframework.core.env.MapPropertySource;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 
-class ProductionHearingArtifactConfigurationTest {
+class ProductionHearingArtifactConfigurationIT {
 
   private static final String CONFIGURATION_CLASS =
       "com.example.dispute.workflow.runtime.artifact."
           + "ProductionHearingArtifactConfiguration";
-  private static final Path TARGET_CLASSES = Path.of("target", "production-runtime-classes");
+  private static final Path TARGET_CLASSES =
+      Path.of(requiredProperty("production.classesDirectory"));
 
   @Test
   void agentAssemblyProvidesAndInjectsTheRealHearingPublicTranscriptCommitter()
@@ -132,5 +133,11 @@ class ProductionHearingArtifactConfigurationTest {
     context.registerBean(MinioClient.class, () -> mock(MinioClient.class));
     context.registerBean(
         PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class));
+  }
+
+  private static String requiredProperty(String name) {
+    String value = System.getProperty(name);
+    assertThat(value).as("required system property %s", name).isNotBlank();
+    return value;
   }
 }

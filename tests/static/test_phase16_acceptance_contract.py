@@ -45,6 +45,8 @@ def test_phase16_ci_quality_gate_exists() -> None:
         "docker compose config",
         "tools/verify/smoke-test.sh",
         "secret",
+        "-Pproduction-runtime",
+        "ruff check --no-cache app",
     ):
         assert required in text
     assert 'COMPOSE_PARALLEL_LIMIT: "1"' in text

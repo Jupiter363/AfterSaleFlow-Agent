@@ -4,3 +4,4 @@ pytest-asyncio==1.4.0
 hypothesis==6.156.9
 testcontainers[postgres]==4.14.2
 pip-tools==7.6.0
+ruff==0.12.12

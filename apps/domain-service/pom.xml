@@ -108,10 +108,6 @@
             <version>${okhttp.version}</version>
         </dependency>
         <dependency>
-            <groupId>co.elastic.clients</groupId>
-            <artifactId>elasticsearch-java</artifactId>
-        </dependency>
-        <dependency>
             <groupId>io.temporal</groupId>
             <artifactId>temporal-sdk</artifactId>
             <version>${temporal.version}</version>
@@ -199,6 +195,11 @@
     </build>
 
     <profiles>
+        <!--
+          Keep the production-only environment post-processor out of the ordinary artifact:
+          it intentionally rejects startup without the signed production marker and secrets.
+          The profile below assembles and verifies that isolated runtime after main compilation.
+        -->
         <profile>
             <id>production-runtime</id>
             <build>
@@ -326,15 +327,26 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration>
+                            <useModulePath>false</useModulePath>
                             <includes>
                                 <include>**/ProductionArtifactIsolationIT.java</include>
+                                <include>**/ProductionHearingArtifactConfigurationIT.java</include>
                             </includes>
                             <systemPropertyVariables>
                                 <production.buildDirectory>${project.build.directory}</production.buildDirectory>
+                                <production.classesDirectory>${production-runtime.classes-directory}</production.classesDirectory>
                                 <production.finalName>${project.build.finalName}</production.finalName>
                                 <production.classifier>${production-runtime.classifier}</production.classifier>
                             </systemPropertyVariables>
                         </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>

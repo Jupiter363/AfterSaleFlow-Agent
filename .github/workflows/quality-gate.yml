@@ -70,18 +70,28 @@ jobs:
         working-directory: apps/domain-service
         run: bash ./mvnw -s .mvn/settings.xml -B -ntp test
 
+      - name: Java production artifact contract
+        working-directory: apps/domain-service
+        run: >
+          bash ./mvnw -s .mvn/settings.xml -B -ntp -Pproduction-runtime
+          -Dproduction-runtime.source-sha=${GITHUB_SHA}
+          -Dproduction-runtime.skip-unit-tests=true
+          clean verify
+
       - name: Python Agent tests
         working-directory: apps/agent-runtime
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+          python -m ruff check --no-cache app
           python -m pytest -q
 
       - name: OCR Parser tests
         working-directory: apps/ocr-parser
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+          python -m ruff check --no-cache app
           python -m pytest -q
 
       - name: Frontend tests and build
