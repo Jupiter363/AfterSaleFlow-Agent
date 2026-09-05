@@ -49,6 +49,30 @@ def _networks(service: dict[str, Any]) -> set[str]:
     return set(value if isinstance(value, list) else value)
 
 
+def test_api_advisory_stream_has_explicit_client_tls_without_server_keys() -> None:
+    services = _compose()["services"]
+    api = services["java-api-service"]
+    env = api["environment"]
+    assert env["APP_AGENT_STREAM_TLS_MODE"] == "MUTUAL_TLS"
+    assert env["PYTHON_AGENT_SERVICE_URL"] == "https://graph-mtls-proxy:8443"
+    assert env["APP_AGENT_STREAM_TLS_KEY_STORE_PASSWORD"] == "${PRODUCTION_RUNTIME_MTLS_KEYSTORE_PASSWORD:?}"
+    assert env["APP_AGENT_STREAM_TLS_TRUST_STORE_PASSWORD"] == "${PRODUCTION_RUNTIME_MTLS_TRUSTSTORE_PASSWORD:?}"
+    mounts = {
+        item["target"]: item for item in api["volumes"]
+        if isinstance(item, dict) and "/agent-stream-tls/" in item["target"]
+    }
+    assert set(mounts) == {
+        env["APP_AGENT_STREAM_TLS_KEY_STORE_PATH"],
+        env["APP_AGENT_STREAM_TLS_TRUST_STORE_PATH"],
+    }
+    for name in ("client.p12", "trust.p12"):
+        item = mounts[f"/run/production-runtime/agent-stream-tls/{name}"]
+        assert item["source"] == "${PRODUCTION_RUNTIME_SECRETS_DIR:?}/mtls/" + name
+        assert item["read_only"] is True
+    assert "APP_AGENT_STREAM_TLS_MODE" not in services["java-control-worker"]["environment"]
+    assert "APP_AGENT_STREAM_TLS_MODE" not in services["java-agent-worker"]["environment"]
+
+
 def _volume_sources(service: dict[str, Any]) -> set[str]:
     return {
         str(value.get("source"))

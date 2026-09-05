@@ -1,6 +1,12 @@
 # 职责拆分版本：浏览器 UAT 记录（2026-09-05）
 
-## 结论
+## 最新状态（2026-09-06）
+
+接待按阶段修复在 `0d5e2216` 的真实模型浏览器 UAT 中通过，双方上传、庭审、V1/评审/V2
+和人工终审入口均已完成；审核解释官提问发现独立 TLS 装配缺口，完整 E2E 尚未通过，未推送。
+以下保留各轮原始失败和修复记录，不能将早期结论理解为最新进度。
+
+## 首轮结论（历史）
 
 `BLOCKED_BEFORE_CASE_CREATION`。本轮使用 Codex 内置浏览器操作真实前端，未使用
 Mock API、旧版应用镜像或历史案件替代当前版本。完整六阶段 E2E 未通过，不满足推送门禁。
@@ -385,3 +391,45 @@ Harness 使用该值选取唯一模板；不从案件文本、模型回答或路
 python -m pytest tests/harness/test_prompt_composer.py tests/harness/test_model_runner.py tests/graphs/intake/test_parallel_outputs.py tests/graphs/intake/test_parallel_graph.py tests/graphs/intake/test_parallel_contracts.py -q -k 'dialogue_phase or parallel_dialogue or provider_visible_schema or ready_invitation_stream or ready_pending_respondent or provider_payloads or three_physical_graphs_stream or production_bundle_deterministically or parallel_intake_frame_prompt or preserve_claim_scope or rejects_rehashed_lane or rejects_lane_hash_drift_on_replay or action_binding_must_match or model_runner_composes_prompt_with_managed_context_window or test_async_stream_preserves_semantic_validator_and_generation_reset'
 python -m pytest tests/graphs/intake/test_parallel_graph.py -q -k 'legacy_v1_reset_complete_checkpoint_replays_without_provider or complete_checkpoint_replays_only_missing_prefix_without_provider or dialogue_single_visible_item_seals_without_terminal_slot_echo'
 ```
+
+### 2026-09-06：真实模型接待通过，审核解释客户端缺少 mTLS
+
+固定启动新建隔离 run `p9-42501af575f1`，构件源码 `0d5e221636275bef62af2f223ae2b2bcf22f2cba`。
+内置浏览器 `25180` 从表单创建虚构案件 `CASE_P9_SYNTHETIC_1`（蓝色杯收到白色、仅核验解释）。
+使用真实 `qwen3.8-flash`，未启用 thinking。未升级组件，旧主环境未变。
+
+- 用户邀请补充轮 `target-intake-run:1948f73b4a4032bf821656a4cfbd815a` COMPLETED；
+  无补充轮 `target-intake-run:e2138bc865223fadb749e9c1b8587a40` COMPLETED。
+  商家相同阶段也完成，双方最终确认进入证据室。没有重发接待消息。
+- 双方各上传一份明确标注测试用途的文字说明，唯一证据 ID 为
+  `EVIDENCE_5f45ebcab7ab48fba4744d51aead4be4`（商家）和
+  `EVIDENCE_77a7ff8f82e14357a5b022ecba61f3e8`（用户）；parse=SUCCEEDED、submission=SUBMITTED。
+  用户文件被标为需人工复核，没有自动处罚。上传回执正确保留。
+- 双方分别填写 5 个庭审焦点、一次提交；补证均明确无其他材料。卷宗冻结，
+  V1 → 评审 → V2 完成并生成冻结审核包，进入终审工作台。
+- 模型 V2 仍提出未经授权的“7 日后自动触发退款资格评估”，仅是待审建议、未执行。
+  这一独立语义质量风险需要人工排除，不应将本轮接待修复描述成所有模型输出都无误。
+- 审核解释官首次提问运行 `AGENT_RUN_0993de946ce24b0bad496aacb956754c` FAILED，
+  error=`AGENT_STREAM_TRANSPORT_FAILED`。Java 日志内层为 SSLHandshakeException / PKIX path building failed；
+  Python 没有收到模型调用。现场累计 19 COMPLETED、1 FAILED，案件 WAITING_HUMAN_REVIEW。
+
+根因：`AgentNdjsonStreamClient` 自行创建系统默认 HttpClient；隔离运行的 Python URL 为
+`https://graph-mtls-proxy:8443`，但 API 未配置客户端证书库/受信 CA。不能用关闭 TLS 验证修复。
+修复增加显式 SYSTEM/MUTUAL_TLS 客户端配置，复用既有严格 PKCS12 校验/TLS1.3/主机名校验，
+通过命名 Bean 注入流客户端；API 只挂载 client.p12 与 trust.p12，保持其他角色、网络拓扑和 Graph
+正式写入路径不变。缺材料/未知模式/明文 mTLS/忽略材料均拒绝，握手失败不降级或重复发送。
+
+截图、输入材料、固定启动及备份回执保存在本机该 run 的 evidence 目录。首轮失败未被覆盖。
+
+定向 Java 回归 20/20 PASS：4 个流客户端装配/拒绝/握手不降级测试、3 个共享 TLS 工厂回归、
+13 个既有流协议/帧校验测试。配置静态回归 29 PASS、5 个历史可选本地脚本检查 SKIP；
+新增 API 只挂载两份只读客户端材料的静态门 1/1 PASS。首次测试编译发现测试调用了包内
+密码复制方法，改为测试反射后最终命令通过，未放宽生产方法可见性。
+
+```powershell
+./mvnw.cmd "-Dtest=AgentStreamTransportConfigurationTest,TrustedGraphTransportFactoryTest#advisoryClientRetainsStrictTlsAndRejectsInvalidMaterial+trustedFactoryBuildsBothTransportsFromOneTls13Proof+wrongPasswordAndMalformedKeyStoreFailClosed,AgentNdjsonStreamClientV2Test" test
+python -m pytest tests/static/test_phase9_production_runtime_deployment.py -q -k api_advisory_stream
+```
+
+该 run 按既有授权静默备份：4 个 PostgreSQL dump + MinIO tar；Domain 真恢复计数
+`1|2|20`，归档 286 entries，5 个文件 SHA-256 再核验一致。旧主环境未停止/删除。

@@ -71,6 +71,21 @@ public final class TrustedGraphTransportFactory {
             Duration connectTimeout,
             URI boundBaseUri,
             GraphReadinessCoordinator.Settings readinessSettings) {
+        HttpClient httpClient = createHttpClient(material, connectTimeout);
+        MutualTlsProof proof = new MutualTlsProof(UUID.randomUUID().toString(), boundBaseUri);
+        GraphReadinessHandshake handshake = boundBaseUri == null
+                ? null : new GraphReadinessHandshake(httpClient, proof, boundBaseUri);
+        GraphReadinessCoordinator coordinator = readinessSettings == null
+                ? null : new GraphReadinessCoordinator(handshake, readinessSettings);
+        return new GraphTransportBundle(
+                new JdkGraphCommandHttpTransport(httpClient, proof, coordinator),
+                new JdkGraphReconciliationHttpTransport(httpClient, proof, coordinator),
+                proof, handshake, coordinator);
+    }
+
+    /** Reuses validated client identity for advisory streams without issuing Graph authority. */
+    public static HttpClient createHttpClient(
+            GraphTlsClientMaterial material, Duration connectTimeout) {
         Objects.requireNonNull(material, "material");
         Duration boundedTimeout = requireConnectTimeout(connectTimeout);
         char[] keyPassword = material.copyKeyStorePassword();
@@ -95,7 +110,7 @@ public final class TrustedGraphTransportFactory {
             SSLParameters sslParameters = new SSLParameters();
             sslParameters.setProtocols(new String[] {"TLSv1.3"});
             sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
-            HttpClient httpClient = HttpClient.newBuilder()
+            return HttpClient.newBuilder()
                     .connectTimeout(boundedTimeout)
                     .followRedirects(HttpClient.Redirect.NEVER)
                     .sslContext(sslContext)
@@ -103,21 +118,6 @@ public final class TrustedGraphTransportFactory {
                     .version(HttpClient.Version.HTTP_1_1)
                     .build();
 
-            MutualTlsProof proof =
-                    new MutualTlsProof(UUID.randomUUID().toString(), boundBaseUri);
-            GraphReadinessHandshake readinessHandshake = boundBaseUri == null
-                    ? null
-                    : new GraphReadinessHandshake(httpClient, proof, boundBaseUri);
-            GraphReadinessCoordinator readinessCoordinator = readinessSettings == null
-                    ? null
-                    : new GraphReadinessCoordinator(readinessHandshake, readinessSettings);
-            return new GraphTransportBundle(
-                    new JdkGraphCommandHttpTransport(httpClient, proof, readinessCoordinator),
-                    new JdkGraphReconciliationHttpTransport(
-                            httpClient, proof, readinessCoordinator),
-                    proof,
-                    readinessHandshake,
-                    readinessCoordinator);
         } catch (GeneralSecurityException | IOException exception) {
             throw new IllegalArgumentException("Graph TLS client material was rejected", exception);
         } finally {

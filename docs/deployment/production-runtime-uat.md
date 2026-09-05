@@ -33,6 +33,12 @@ Windows 和 Linux 路由读取受支持；其他平台明确停止，不能跳�
 证书、随机密码、签名绑定、镜像证明及 run env 自动保存在
 `~/.after-sale-flow/production-runtime-local/`（可用 `--runtime-root` 指定另一个工作区外目录）。
 这些是自动生成的私有运行产物，不是需要手工维护的启动配置。
+
+审核解释流由 API 的 `app.agent-stream.tls.mode=MUTUAL_TLS` 使用同次签发的 Java
+客户端 PKCS12 与信任库。Compose 只读挂载 `client.p12` 和 `trust.p12`，不将 CA/服务端
+私钥交给 API，也不修改 JVM 全局信任配置。TLS1.3、HTTPS 主机名校验和禁止重定向保持；
+缺少材料即启动失败，不降级明文。Graph command/reconciliation 仍由原有独立传输负责。
+
 重复同一命令会通过 `current-run.json` 与正式 host lock 复用同一提交/配置的运行；
 源代码、模型配置或 host lock 漂移时停止。启动失败保留该运行用于取证，不自动删库重试。
 换版本前先按下述 `teardown.py` 归档并清理该精确 UAT，随后归档该目录的

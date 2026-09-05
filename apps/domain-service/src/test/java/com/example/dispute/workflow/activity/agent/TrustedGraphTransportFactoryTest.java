@@ -126,6 +126,23 @@ class TrustedGraphTransportFactoryTest {
     }
 
     @Test
+    void advisoryClientRetainsStrictTlsAndRejectsInvalidMaterial() throws Exception {
+        Path keyStore = writeClientKeyStore();
+        Path trustStore = writeTrustStore();
+        try (GraphTlsClientMaterial material = material(keyStore, KEY_PASSWORD, trustStore, TRUST_PASSWORD);
+                HttpClient client = TrustedGraphTransportFactory.createHttpClient(material, Duration.ofSeconds(2))) {
+            assertThat(client.sslContext().getProtocol()).isEqualTo("TLSv1.3");
+            assertThat(client.sslParameters().getProtocols()).containsExactly("TLSv1.3");
+            assertThat(client.sslParameters().getEndpointIdentificationAlgorithm()).isEqualTo("HTTPS");
+            assertThat(client.followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
+        }
+        try (GraphTlsClientMaterial material = material(keyStore, "wrong".toCharArray(), trustStore, TRUST_PASSWORD)) {
+            assertThatThrownBy(() -> TrustedGraphTransportFactory.createHttpClient(material, Duration.ofSeconds(2)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("TLS client material was rejected");
+        }
+    }
+
+    @Test
     void trustedBundleVerifiesReadinessBeforeReusingTheSameClientForACommand() throws Exception {
         URI baseUri = URI.create("https://graph.example.test:8443/graph-base/");
         RecordingHttpClient client = new RecordingHttpClient(new StubResponseSpec(

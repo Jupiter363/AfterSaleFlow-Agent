@@ -34,6 +34,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 // 所属模块：【Agent 流式运行 / 外部集成层】类型「AgentNdjsonStreamClient」。
@@ -74,13 +76,15 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
     // 系统意义：「AgentNdjsonStreamClient.AgentNdjsonStreamClient(AppProperties,ObjectMapper)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public AgentNdjsonStreamClient(AppProperties properties, ObjectMapper objectMapper) {
+        this(properties, objectMapper, AgentStreamTransportConfiguration.systemClient(properties));
+    }
+
+    @Autowired
+    public AgentNdjsonStreamClient(AppProperties properties, ObjectMapper objectMapper,
+            @Qualifier("agentStreamHttpClient") HttpClient httpClient) {
         AppProperties.Integration integration = properties.agent();
         this.requestTimeout = Duration.ofMillis(integration.timeoutMs());
-        this.httpClient =
-                HttpClient.newBuilder()
-                        .version(HttpClient.Version.HTTP_1_1)
-                        .connectTimeout(requestTimeout)
-                        .build();
+        this.httpClient = java.util.Objects.requireNonNull(httpClient, "httpClient");
         this.objectMapper = objectMapper;
         this.baseUri = URI.create(withTrailingSlash(integration.baseUrl()));
         this.serviceSecret = integration.serviceSecret();
