@@ -332,7 +332,7 @@ def test_java_maven_settings_use_the_official_central_repository() -> None:
     assert mirror.findtext("m:url", namespaces=namespace) == (
         "https://repo.maven.apache.org/maven2/"
     )
-    assert mirror.findtext("m:mirrorOf", namespaces=namespace) == "central"
+    assert mirror.findtext("m:mirrorOf", namespaces=namespace) == "external:*"
 
 
 # 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
