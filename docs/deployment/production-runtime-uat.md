@@ -10,6 +10,37 @@ This Compose project is independent from `docker-compose.yml`: it uses a run-sco
 named networks and volumes, an isolated gateway port, separate Domain/Graph/Temporal PostgreSQL
 instances, and no production endpoint or credential.
 
+## 固定本机启动入口
+
+在仓库根目录执行（Python 环境需安装本工具已有的 `cryptography` 依赖，Docker、
+OpenSSL、JDK keytool 与本机镜像仓库 `127.0.0.1:25000` 需已可用）：
+
+```powershell
+python tools/uat/production-runtime/start.py
+```
+
+只维护版本化配置 `infra/environments/production-runtime-uat/local-start.json`、
+`base-images.json` 和已有私有 `.env` 中的模型接入参数。核心镜像以现有版本的 digest
+锁定，入口不升级 Docker/Temporal/数据库，不启动或替换共享核心项目。模型密钥不提交；
+需要其他密钥文件时显式传 `--model-env-file <path>`。
+
+入口要求干净的当前提交，依次执行精确镜像构建、私有配置生成、网络分配、正式预检、
+Compose 启动与完整基础设施就绪验证。默认地址为 `http://127.0.0.1:25180/disputes`，
+不覆盖旧的 5173/8080 本机环境。`10.247.240.0/24` 分配为 14 个独立 /28 网络；创建前
+检查全部 Docker 网络与本机路由，冲突即停止，不修改 daemon 地址池、不清理历史网络。
+Windows 和 Linux 路由读取受支持；其他平台明确停止，不能跳过冲突检查。
+
+证书、随机密码、签名绑定、镜像证明及 run env 自动保存在
+`~/.after-sale-flow/production-runtime-local/`（可用 `--runtime-root` 指定另一个工作区外目录）。
+这些是自动生成的私有运行产物，不是需要手工维护的启动配置。
+重复同一命令会通过 `current-run.json` 与正式 host lock 复用同一提交/配置的运行；
+源代码、模型配置或 host lock 漂移时停止。启动失败保留该运行用于取证，不自动删库重试。
+换版本前先按下述 `teardown.py` 归档并清理该精确 UAT，随后归档该目录的
+`current-run.json`，再执行同一入口生成新运行。
+
+`startup-receipt.json` 仅表示基础设施就绪，明确不宣称业务 E2E 通过；仍需从表单创建新案件，
+验证完整业务流程后才能推送/发布。以下分步命令保留用于诊断与显式运维，不是日常手工启动要求。
+
 Provisioning requires a self-hashed v2 image lock. Every image records its registry manifest,
 config, ordered layers, source revision, and build ID; application image source revisions must
 equal the exact candidate SHA. Tags, `latest`, incomplete provenance, and v1 locks are rejected.

@@ -1,0 +1,8 @@
+{
+  "schema_version": "production-runtime-local-start.v1",
+  "gateway_port": 25180,
+  "network_pool": "10.247.240.0/24",
+  "network_prefix_length": 28,
+  "repository_prefix": "127.0.0.1:25000/after-sale/current-uat",
+  "wait_timeout_seconds": 600
+}

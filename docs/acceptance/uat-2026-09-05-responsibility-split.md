@@ -166,3 +166,17 @@ node node_modules/vite/bin/vite.js build
   两次失败启动的日志/镜像/网络证据已导出，再按各自 host lock 清理临时资源；未删除历史数据。
 
 截至此记录，完整浏览器业务流程仍未通过，尚未推送。
+
+## 固定启动流程归一（2026-09-06）
+
+用户要求停止手工维护临时启动步骤。本轮加入版本化 `start.py`、本机非秘密默认配置和
+现有核心镜像 digest 清单；统一构建、私有配置生成、网络分配、预检、启动与 readiness。
+网络分配被放到数据库 bootstrap 之前，保留零旧资源检查和精确 host-lock 清理边界；
+重试只接受同一归属/拓扑，不 prune 历史 Docker 网络。运行目录自动生成，不提交密钥。
+
+- `test_production_runtime_start.py` + 原数据库 bootstrap 回归：12/12 PASS。
+- Java 激活装配相邻测试 `ProductionActivationRuntimeConfigurationTest`：7/7 PASS。
+- `b5f4f3f5b46025df66ed3acd5a8b7706f7d231a4` 镜像构建已成功；统一入口修改需新的精确
+  提交镜像，不能把这次构建当作新入口或业务 E2E 的通过证明。
+
+尚待以统一入口实际启动并完成浏览器业务验收；未推送。

@@ -1,0 +1,10 @@
+{
+  "postgres": "public.ecr.aws/docker/library/postgres@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb",
+  "redis": "public.ecr.aws/docker/library/redis@sha256:dfa18828cbc07b3ae6a95ec7343f6c214fdee2d836197b4be8e9904420762cd8",
+  "minio": "quay.io/minio/minio@sha256:c7175077d39a8cc10c9fd611cdcc68b6a5b365793e9ac6f4198ffff1ef0fe555",
+  "minio_mc": "quay.io/minio/mc@sha256:f0322a2de84d95ead5ed1b1b09ab8dca9936bc3163d3b0852779731021156ab3",
+  "elasticsearch": "docker.elastic.co/elasticsearch/elasticsearch@sha256:dfd318b417be1356d9c7fdd6a5577c8a45553ac9d34354929a416c69c85daa9f",
+  "temporal": "temporalio/auto-setup@sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f",
+  "nginx": "public.ecr.aws/docker/library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10",
+  "curl": "curlimages/curl@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b"
+}

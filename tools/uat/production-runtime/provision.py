@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import ledger
 import model_config
+import networks
 import teardown
 
 SYNTHETIC_FIXTURE_SET_ID = "p9-synthetic-all-rooms-001"
@@ -204,6 +205,7 @@ def _bootstrap_database_identities(
     env_path: Path, lock: dict[str, Any]
 ) -> tuple[dict[str, str], dict[str, str]]:
     teardown.assert_no_locked_resources(lock)
+    networks.ensure_networks(env_path, lock)
     common.run_command(
         common.compose_argv(
             env_path,

@@ -850,13 +850,16 @@ def test_database_bootstrap_starts_only_final_databases_and_measures_both(
     monkeypatch.setattr(
         teardown, "assert_no_locked_resources", lambda value: checked.append(value)
     )
+    monkeypatch.setattr(
+        provision.networks, "ensure_networks", lambda _env, value: checked.append(value)
+    )
     monkeypatch.setattr(common, "run_command", fake_run)
 
     domain, graph = provision._bootstrap_database_identities(
         tmp_path / ".bootstrap.env", lock
     )
 
-    assert checked == [lock]
+    assert checked == [lock, lock]
     assert domain["clusterIdentity"] == "pg-system-id/1001"
     assert graph["clusterIdentity"] == "pg-system-id/1002"
     up = calls[0]
