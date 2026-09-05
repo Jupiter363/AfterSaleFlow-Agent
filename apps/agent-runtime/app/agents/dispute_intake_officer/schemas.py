@@ -1084,7 +1084,7 @@ def intake_case_detail_output_type(
     """Return the provider contract authorized for this exact Intake phase."""
 
     if is_exact_fresh_form_opening(request):
-        return IntakeInitiatorRoomLlmOutputV3
+        return intake_fresh_form_output_type()
     if is_exact_handoff_remark_turn(request):
         return IntakeRemarkAcknowledgementLlmOutput
     if is_exact_respondent_substantive_turn(request):
@@ -1092,6 +1092,13 @@ def intake_case_detail_output_type(
     else:
         base_output_type = IntakeInitiatorRoomLlmOutputV3
     return _previous_phase_locked_room_output_type(request, base_output_type)
+
+
+def intake_fresh_form_output_type() -> type[BaseModel]:
+    """A new form has no persisted invitation; keep its provider action substantive."""
+    return _cached_previous_phase_locked_room_output_type(
+        IntakeInitiatorRoomLlmOutputV3, "ASK_SUBSTANTIVE"
+    )
 
 
 def _previous_phase_locked_room_output_type(

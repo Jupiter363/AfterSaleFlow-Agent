@@ -36,6 +36,8 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeRemarkAcknowledgementLlmOutput,
     IntakeRespondentOpeningLlmOutput,
     intake_case_detail_output_type,
+    intake_fresh_form_output_type,
+    is_exact_fresh_form_opening,
     materialize_intake_case_detail_output,
 )
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
@@ -359,11 +361,7 @@ class IntakeRouteModelRunnable(
                 agent_context=self._agent_context,
             )
             output_type = intake_case_detail_output_type(request)
-            if (
-                output_type is IntakeInitiatorRoomLlmOutputV3
-                and request.initial_case_facts is not None
-                and request.current_user_message is None
-            ):
+            if is_exact_fresh_form_opening(request):
                 return self._fresh_form_opening_flow
             if output_type is IntakeRemarkAcknowledgementLlmOutput:
                 return self._remark_acknowledgement_flow
@@ -2100,15 +2098,16 @@ def build_intake_model_node(
     parser = PydanticOutputParser(pydantic_object=IntakeInitiatorRoomLlmOutputV3)
     fresh_form_opening_profile = deepcopy(profile)
     fresh_form_opening_policy = deepcopy(policy)
+    fresh_form_output_type = intake_fresh_form_output_type()
     fresh_form_opening_model = GovernedChatModel(
         transport=transport,
-        output_type=IntakeInitiatorRoomLlmOutputV3,
+        output_type=fresh_form_output_type,
         profile=fresh_form_opening_profile,
         policy=fresh_form_opening_policy,
         visible_fields=_FRESH_FORM_OPENING_VISIBLE_FIELDS,
     )
     fresh_form_opening_parser = PydanticOutputParser(
-        pydantic_object=IntakeInitiatorRoomLlmOutputV3
+        pydantic_object=fresh_form_output_type
     )
     remark_acknowledgement_profile = deepcopy(profile)
     remark_acknowledgement_policy = deepcopy(policy)

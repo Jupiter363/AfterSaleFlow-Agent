@@ -15,6 +15,7 @@ from app.agents.dispute_intake_officer.schemas import (
     IntakeConversationAction,
     MaterializedIntakeRoomLlmOutputV3,
     intake_case_detail_output_type,
+    is_exact_fresh_form_opening,
     materialize_intake_case_detail_output,
 )
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
@@ -275,6 +276,12 @@ def build_intake_turn_context_pack(
             request_json.get("recent_dialogue_messages") or []
         ),
     }
+    if is_exact_fresh_form_opening(validated):
+        context_sources["case_identity"]["intake_turn_authority"] = {
+            "turn_source": validated.turn_source,
+            "previous_phase": "NOT_READY",
+            "allowed_conversation_actions": ["ASK_SUBSTANTIVE"],
+        }
     required_sections = {"case_identity"}
     if request_json.get("current_user_message") is not None:
         context_sources["current_user_message"] = request_json["current_user_message"]

@@ -589,3 +589,24 @@ digest 的隔离测试容器；未修改正式 ledger、业务决策、迁移或
 python -m pytest tests/agents/test_review_output.py tests/agents/test_review_copilot.py tests/graphs/outcome -q --disable-warnings
 ./mvnw.cmd "-Dtest=JdbcProductionCommandCompletionOwnershipTest,ProductionMultiRoomFinalizationGatewayTest,ProductionReviewRoomFinalizationStrategyAuthorizationTest,ProductionMultiRoomOuterFinalizerContractTest" test
 ```
+
+### 2026-09-06：补齐 INITIAL_FORM 首轮阶段 Schema
+
+下一轮 `ab079d24` / `p9-110400cb64bb` 的 CUP-04 首次表单运行被正确中止，未落正式卷宗：
+`INTAKE_CONVERSATION_ACTION_PHASE_CONFLICT`（对外 GRAPH_STREAM_PROTOCOL_REJECTED）。
+普通 ROOM_MESSAGE 已使用按上一阶段收窄的 ordered Schema，但 exact fresh form selector
+和专用 LCEL 模型/解析器仍使用通用 `IntakeInitiatorRoomLlmOutputV3`，其中允许当前轮高分后
+直接生成 INVITE_OPTIONAL_REMARK；初始状态机只允许 ASK_SUBSTANTIVE，因而拒绝。
+
+修复复用既有 ASK_SUBSTANTIVE 分支 Schema，同时绑定 fresh form 的 request selector、
+真实模型与 parser；ContextPack 明确提供可信首轮 NOT_READY/允许动作，提示词说明当前高分
+不授权提前邀请。未改变状态机或历史 wire，未把模型非法动作改写为合法动作。
+
+真实 Graph 新测试先证明旧 generic schema 接受提前邀请、随后复现相同阶段冲突；修复后
+首轮生成终态、实际 provider Schema 排除邀请、非法结果在 parser 阶段拒绝且未进 reducer。
+正例保留原请求与材料，schema 重放无额外模型调用。初始化测试时修正过缺失测试 context 与
+fixture version pins，只有复现业务异常之后的 old-red 才作为机制证据。
+
+定向 Python 99 PASS / 15 deselected（fresh form、ordered room、并行三分支、状态提示词），
+Ruff 和 diff whitespace 检查通过。失败 UAT 已冻结恢复验证 `1|0|1`、对象 113 entries，
+5 份备份 hash 复核后执行 exact run teardown；旧主环境不变。继续等待完整新案 E2E，未推送。
