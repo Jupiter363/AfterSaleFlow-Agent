@@ -416,29 +416,24 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
     "persisted_phase",
     ("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"),
 )
-def test_ready_respondent_dossier_encodes_no_remark_as_an_exact_empty_delta(
+@pytest.mark.parametrize("respondent_capacity", [False, True])
+def test_frozen_dossier_schema_has_no_substantive_capability_for_either_party(
     persisted_phase: str,
+    respondent_capacity: bool,
 ) -> None:
     frame_type, _ = request_bound_dossier_output_types(
         existing_fact_keys=("FACT_01",),
         new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
-        respondent_capacity=True,
-        allow_empty_respondent_delta=True,
+        respondent_capacity=respondent_capacity,
+        persisted_phase=persisted_phase,
     )
     schema = frame_type.model_json_schema()
-    assert schema["required"] == [
-        "respondent_attitude",
-        "respondent_position_summary",
-        "respondent_alternative_proposal",
-        "public_projection_items",
-    ]
-    assert "minItems" not in schema["properties"]["public_projection_items"]
-    assert schema["properties"]["public_projection_items"]["maxItems"] == 5
+    assert schema["required"] == ["public_projection_items"]
+    assert set(schema["properties"]) == {"public_projection_items"}
+    assert schema["properties"]["public_projection_items"]["maxItems"] == 0
+    assert frame_type.intake_dossier_phase == persisted_phase
 
     no_delta = {
-        "respondent_attitude": None,
-        "respondent_position_summary": None,
-        "respondent_alternative_proposal": None,
         "public_projection_items": [],
     }
     assert frame_type.model_validate(no_delta)
@@ -446,7 +441,7 @@ def test_ready_respondent_dossier_encodes_no_remark_as_an_exact_empty_delta(
         "DOSSIER_FRAME",
         no_delta,
         persisted_phase=persisted_phase,
-        respondent_capacity=True,
+        respondent_capacity=respondent_capacity,
         frozen_case_matrix=_frozen_matrix(),
     )
     assert materialized.public_projection_items == ()
@@ -460,12 +455,23 @@ def test_ready_respondent_dossier_encodes_no_remark_as_an_exact_empty_delta(
             "respondent_alternative_proposal": "",
         }
     )
-    with pytest.raises(ValidationError, match="no-delta remark"):
+    with pytest.raises(ValidationError, match="Extra inputs"):
         frame_type.model_validate(claim_without_fact)
 
     fact_without_claim = {**no_delta, **_dossier_provider_frame()}
-    with pytest.raises(ValidationError, match="complete respondent claim"):
+    with pytest.raises(ValidationError):
         frame_type.model_validate(fact_without_claim)
+    with pytest.raises(ValidationError):
+        materialize_request_bound_frame_output(
+            "DOSSIER_FRAME", fact_without_claim, persisted_phase=persisted_phase,
+            respondent_capacity=respondent_capacity, frozen_case_matrix=_frozen_matrix(),
+        )
+    # Persisted Frame readers are unchanged, including historical nonempty Frames.
+    assert validate_parallel_frame_output("DOSSIER_FRAME", _dossier_frame())
+    assert materialize_request_bound_frame_output(
+        "DOSSIER_FRAME", no_delta, persisted_phase=persisted_phase,
+        respondent_capacity=respondent_capacity,
+    ) == materialized
 
     with pytest.raises(ValueError, match="only a respondent remark"):
         request_bound_dossier_output_types(

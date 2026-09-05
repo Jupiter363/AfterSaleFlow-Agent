@@ -1509,6 +1509,7 @@ def _request_bound_frame_types(
     if frame_type != "DOSSIER_FRAME":
         return FRAME_OUTPUT_MODELS[frame_type], FRAME_PUBLIC_ITEM_MODELS[frame_type]
     output_type, item_type = request_bound_dossier_output_types(
+        persisted_phase=model_context.previous_state.persisted_phase,
         existing_fact_keys=model_context.fact_key_authority.existing_fact_keys,
         new_fact_key_prefix=model_context.fact_key_authority.new_fact_key_prefix,
         respondent_capacity=(

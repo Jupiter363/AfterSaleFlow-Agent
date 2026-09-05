@@ -156,7 +156,7 @@ class IntakeParallelFrameAssemblerTest {
         ObjectNode previous = previousDossier("READY_PENDING_REMARK_INVITE", 90, true);
         var output = assembler.assemble(command(previous, frames(
                 dialogue(previous, "INVITE_OPTIONAL_REMARK"),
-                dossier(),
+                emptyDossier(),
                 quality(Map.of(
                         "references", 1,
                         "event_story", 1,
@@ -661,7 +661,7 @@ class IntakeParallelFrameAssemblerTest {
         ObjectNode previous = previousDossier("WAITING_FOR_REMARK", 90, true);
         var withRemark = assembler.assemble(command(previous, frames(
                 dialogue(previous, "ACK_REMARK"),
-                dossier(),
+                emptyDossier(),
                 quality(Map.of(
                         "references", 15,
                         "event_story", 20,
@@ -672,7 +672,7 @@ class IntakeParallelFrameAssemblerTest {
                         List.of()))));
         var withoutRemark = assembler.assemble(command(previous, frames(
                 dialogue(previous, "ACK_NO_REMARK"),
-                dossier(),
+                emptyDossier(),
                 quality(Map.of(
                         "references", 15,
                         "event_story", 20,
@@ -694,6 +694,34 @@ class IntakeParallelFrameAssemblerTest {
                         .at("/party_intake_state/USER/handoff_notes/remark_status")
                         .asText())
                 .isEqualTo("NO_EXTRA_REMARKS");
+        assertThat(withRemark.proposal().matrixPatch()).isNull();
+        assertThat(withoutRemark.proposal().matrixPatch()).isNull();
+        assertThat(withoutRemark.proposal().dossierPatch().has("case_story")).isFalse();
+        var replay = assembler.assemble(command(previous, frames(
+                dialogue(previous, "ACK_NO_REMARK"), emptyDossier(),
+                quality(Map.of("references", 15, "event_story", 20, "party_positions", 20,
+                        "requested_resolution", 15, "risk_and_conflicts", 15, "next_action_clarity", 15), List.of()))));
+        assertThat(replay.canonicalProposalBytes()).isEqualTo(withoutRemark.canonicalProposalBytes());
+    }
+
+    @Test
+    void frozenRemarkRejectsSubstantiveFramesInsteadOfPassingAMatrixDeltaToFinalization() {
+        for (String phase : List.of("READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK")) {
+            ObjectNode previous = previousDossier(phase, 90, true);
+            assertThatThrownBy(() -> assembler.assemble(command(previous, frames(
+                    dialogue(previous, "WAITING_FOR_REMARK".equals(phase) ? "ACK_REMARK" : "INVITE_OPTIONAL_REMARK"),
+                    dossier(), quality(Map.of("references", 15, "event_story", 20, "party_positions", 20,
+                            "requested_resolution", 15, "risk_and_conflicts", 15, "next_action_clarity", 15), List.of())))))
+                    .isInstanceOf(AssemblyRejectedException.class)
+                    .hasMessageContaining("post-threshold Dossier Frame");
+        }
+    }
+
+    private static ObjectNode emptyDossier() {
+        ObjectNode frame = MAPPER.createObjectNode();
+        frame.putArray("public_projection_items");
+        frame.putObject("dossier_delta").putNull("respondent_claim");
+        return frame;
     }
 
     private static AssemblyCommand command(

@@ -736,6 +736,13 @@ public class AgentRunEntity extends AbstractEntity {
                 completedAt);
     }
 
+    public boolean recordV4FinalizationFailure(
+            String attemptId, String resultHash, AgentRunAttemptStatus terminalStatus,
+            String safeErrorCode, Instant completedAt) {
+        return recordFinalizationFailure(AgentRunProtocol.V4, attemptId, resultHash,
+                terminalStatus, safeErrorCode, completedAt);
+    }
+
     private boolean recordFinalizationFailure(
             AgentRunProtocol expectedProtocol,
             String attemptId,

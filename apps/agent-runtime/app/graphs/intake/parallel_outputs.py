@@ -451,12 +451,19 @@ class IntakeRespondentRemarkDossierGenerationV7(StrictFrameOutput):
             raise ValueError("Dossier current-source facts must have unique fact keys")
         return self
 
+class IntakeFrozenDossierGenerationV8(StrictFrameOutput):
+    """No substantive write capability after the persisted readiness threshold."""
+
+    public_projection_items: tuple[()] = Field(max_length=0)
+
+
 def request_bound_dossier_output_types(
     *,
     existing_fact_keys: tuple[str, ...],
     new_fact_key_prefix: str,
     respondent_capacity: bool,
     allow_empty_respondent_delta: bool = False,
+    persisted_phase: str = "NOT_READY",
 ) -> tuple[type[BaseModel], type[DossierPublicFactDraftV5]]:
     """Narrow Dossier authority in the provider-visible Schema for this exact turn."""
 
@@ -473,6 +480,16 @@ def request_bound_dossier_output_types(
         raise ValueError("request-bound new fact-key prefix is invalid")
     if allow_empty_respondent_delta and not respondent_capacity:
         raise ValueError("only a respondent remark can authorize an empty delta")
+    if persisted_phase not in {"NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"}:
+        raise ValueError("Dossier provider phase cannot accept a ROOM_MESSAGE")
+    if persisted_phase != "NOT_READY":
+        frozen_type = create_model(
+            f"IntakeFrozenDossierGenerationV8_{persisted_phase}",
+            __base__=IntakeFrozenDossierGenerationV8,
+            __module__=__name__,
+        )
+        frozen_type.intake_dossier_phase = persisted_phase
+        return frozen_type, DossierPublicFactDraftV5
 
     # Provider-only narrowing: issue complete NEW_ keys instead of asking the model
     # to concatenate a request hash with an arbitrary suffix. Stable persisted Frame
@@ -519,6 +536,7 @@ def request_bound_dossier_output_types(
             public_items_field,
         ),
     )
+    frame_type.intake_dossier_phase = persisted_phase
     return (
         frame_type,
         cast(type[DossierPublicFactDraftV5], item_type),
@@ -757,32 +775,24 @@ def materialize_request_bound_frame_output(
             }
         )
     if frame_type == "DOSSIER_FRAME":
+        if persisted_phase in {"READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"}:
+            # Only the task draft is new. The sealed Frame wire contract and
+            # historical checkpoint reader remain unchanged.
+            IntakeFrozenDossierGenerationV8.model_validate(payload)
+            return IntakeDossierFrameV3.model_validate({
+                "public_projection_items": [],
+                "dossier_delta": {"respondent_claim": None},
+            })
+        if persisted_phase != "NOT_READY":
+            raise ValueError("Dossier provider phase cannot accept a ROOM_MESSAGE")
         respondent_claim: dict[str, Any] | None = None
         if respondent_capacity:
-            if persisted_phase in {
-                "READY_PENDING_REMARK_INVITE",
-                "WAITING_FOR_REMARK",
-            }:
-                draft = IntakeRespondentRemarkDossierGenerationV7.model_validate(
-                    payload
-                )
-                if draft.public_projection_items:
-                    respondent_claim = {
-                        "attitude": draft.respondent_attitude,
-                        "position_summary": draft.respondent_position_summary,
-                        "alternative_proposal": (
-                            draft.respondent_alternative_proposal or None
-                        ),
-                    }
-            else:
-                draft = IntakeRespondentDossierGenerationV6.model_validate(payload)
-                respondent_claim = {
-                    "attitude": draft.respondent_attitude,
-                    "position_summary": draft.respondent_position_summary,
-                    "alternative_proposal": (
-                        draft.respondent_alternative_proposal or None
-                    ),
-                }
+            draft = IntakeRespondentDossierGenerationV6.model_validate(payload)
+            respondent_claim = {
+                "attitude": draft.respondent_attitude,
+                "position_summary": draft.respondent_position_summary,
+                "alternative_proposal": draft.respondent_alternative_proposal or None,
+            }
         else:
             draft = IntakeDossierGenerationV5.model_validate(payload)
         materialized_items = [

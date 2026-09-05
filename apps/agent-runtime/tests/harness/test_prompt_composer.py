@@ -202,6 +202,24 @@ def test_dialogue_phase_prompt_rejects_missing_or_unsupported_authority(phase) -
         PromptRepository().render_system_prompt("intake_turn_dialogue_frame", intake_dialogue_phase=phase)
 
 
+@pytest.mark.parametrize("phase", ["READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"])
+def test_frozen_dossier_prompt_replaces_fact_generation_instructions(phase) -> None:
+    repository = PromptRepository()
+    prompt = repository.render_system_prompt("intake_turn_dossier_frame", intake_dossier_phase=phase)
+    assert "本任务唯一输出" in prompt
+    assert "fact_key.enum" not in prompt
+    assert "respondent_attitude" not in prompt
+    assert "fact_key.enum" in repository.render_system_prompt(
+        "intake_turn_dossier_frame", intake_dossier_phase="NOT_READY",
+    )
+    _, sealed = repository.parallel_frame_instruction_sources("intake_turn_dossier_frame")
+    assert "本任务唯一输出" in sealed
+    with pytest.raises(PromptResourceError):
+        repository.render_system_prompt("intake_turn_quality_frame", intake_dossier_phase=phase)
+    with pytest.raises(PromptResourceError):
+        repository.render_system_prompt("intake_turn_dossier_frame", intake_dossier_phase="HAS_REMARKS")
+
+
 def test_dialogue_phase_prompt_cannot_select_a_foreign_node() -> None:
     with pytest.raises(PromptResourceError, match="another node"):
         PromptRepository().render_system_prompt("intake_turn_dossier_frame", intake_dialogue_phase="WAITING_FOR_REMARK")

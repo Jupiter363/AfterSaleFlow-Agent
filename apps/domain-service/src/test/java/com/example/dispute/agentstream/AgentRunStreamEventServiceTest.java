@@ -6,6 +6,8 @@
  */
 package com.example.dispute.agentstream;
 
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
@@ -351,6 +353,37 @@ class AgentRunStreamEventServiceTest {
         assertThat(service.replay(run.getId(), -1L, actor))
                 .extracting(AgentRunEventView::type)
                 .containsExactly("public_frame_start", "final");
+    }
+
+    @Test
+    void rejectedV4FinalStaysHiddenWhileItsAdjacentSanitizedErrorIsReplayable() throws Exception {
+        AgentRunEntity run = v4Run();
+        AgentRunAttemptEntity attempt = v4Attempt();
+        var result = AgentRunPersistenceFixtures.parallelIntakeResult(0);
+        run.markV4AttemptStarted();
+        attempt.recordV4ResultReady(result, objectMapper.writeValueAsString(result), -1);
+        run.markV4ResultReady(attempt.getId(), result.resultHash(), result.completedAt());
+        String code = "AGENT_RUN_FINALIZATION_REJECTED";
+        attempt.recordFinalizationFailure(run.getId(), 1, attempt.getCommandId(), attempt.getCommandRequestHash(),
+                result.resultHash(), 0, true, AgentRunAttemptStatus.ABORTED, code);
+        run.recordV4FinalizationFailure(attempt.getId(), result.resultHash(), AgentRunAttemptStatus.ABORTED,
+                code, result.completedAt());
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId())).thenReturn(List.of(attempt));
+        when(eventRepository.findV4ReplayPage(org.mockito.ArgumentMatchers.eq(run.getId()),
+                org.mockito.ArgumentMatchers.eq(attempt.getId()), org.mockito.ArgumentMatchers.eq(-1L), any()))
+                .thenReturn(List.of(
+                        v4Event(run.getId(), attempt.getId(), 0, AgentStreamEventV4.EventType.FINAL,
+                                AgentStreamEventV4.Payload.finalPayload("hidden-final", result.resultHash())),
+                        v4Event(run.getId(), attempt.getId(), 1, AgentStreamEventV4.EventType.ERROR,
+                                AgentStreamEventV4.Payload.errorPayload(code, false))));
+        var replay = service.replay(run.getId(), -1L, actor);
+        assertThat(replay).extracting(AgentRunEventView::type).containsExactly("error");
+        assertThat(replay.getFirst().code()).isEqualTo(code);
+        assertThat(service.replay(run.getId(), -1L, actor)).isEqualTo(replay);
+        setField(run, "errorCode", "FOREIGN_FAILURE");
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .hasMessageContaining("events after a terminal");
     }
 
     @Test

@@ -2,8 +2,9 @@
 
 ## 最新状态（2026-09-06）
 
-`6625c0e1` 的真实模型浏览器 UAT 已到达 CLOSED/OUTCOME，终审解释官 mTLS 修复也已通过。
-后台审计发现终审辅助记录仍因 JDBC Instant 绑定失败，完整验收暂不通过，未推送。
+前轮真实模型浏览器 UAT 曾到达 CLOSED/OUTCOME；终审解释官 mTLS 已验证，辅助记录 JDBC
+时间绑定也已修复。最新 `3262547d` 轮发现备注阶段 Dossier 越权和 v4 失败收口缺口，已定位修复，
+正在重新验证；完整验收暂不通过，未推送。
 以下保留各轮原始失败和修复记录，不能将早期结论理解为最新进度。
 
 ## 首轮结论（历史）
@@ -465,3 +466,54 @@ python -m pytest tests/static/test_phase9_production_runtime_deployment.py -q -k
 修复后 `./mvnw.cmd "-Dtest=JdbcTargetReviewAdvisoryProjectionPortTest,TargetReviewContractsTest" test`
 通过 8/8（3 个真实数据库测试 + 5 个邻接合约测试），0 failure/error/skip；旧代码的单个决定性
 回归先因与 live 完全相同的 Instant 类型异常失败。`git diff --check` 通过。
+
+### 2026-09-06：备注阶段 Dossier 越权与 v4 失败收口
+
+源码 `3262547d214e041b17767e64aa2ba93641b5074c`、隔离 run `p9-ea623ca259c6` 的新案件，
+用户在邀请后回复“没有补充备注，按已确认的核验解释范围继续，不作其他权利放弃”。
+运行 `target-intake-run:1d31839cc37a30ac9f56696e6eaa2a19` 停在 RESULT_READY/UNCOMMITTED。
+有界 JFR 异常采样确认两条原因，不依赖推测，也没有重发消息：
+
+1. `IntakeFinalizationRejectedException: post-threshold Intake messages cannot change frozen substantive authority`。
+   Dialogue 已按状态裁剪，但 Dossier 仍把无备注确认抽取为新事实并生成 matrix delta，
+   违反既有 post-threshold substantive freeze；不是 JSON 格式错误。
+2. 失败记录器无条件调用 v3 entity transition，遇到 v4 抛出
+   `operation requires an exact agent-stream.v3 Temporal AgentRun row`，掩盖原始拒绝并反复重试。
+
+修复保持状态机及正式冻结规则不变：
+
+- 新的 request-bound Dossier draft 在 READY_PENDING_REMARK_INVITE/WAITING_FOR_REMARK 下，
+  仅有 maxItems=0 的 public_projection_items；没有事实字段或 respondent null 占位字段。
+  模型上下文只保留可信阶段，不发事实矩阵、写 key 或消息；独立冻结提示词替换实质事实提示词，
+  并纳入启动资源检查和 instruction hash。Dialogue/Java 仍保存真实备注。
+- 物化器补齐既有 sealed Frame 空增量，Java assembler 对 post-threshold 非空 dossier/matrix
+  明确拒绝。NOT_READY 的事实生成、历史 sealed Frame 读取和 checkpoint replay 保持。
+- 按持久 protocol=v4 使用独立 entity transition 与 v4 writer。验证原 FINAL 的协议、hash、
+  run/attempt/sequence/result/audience，保持原 Graph result 审计，在同一事务记录拒绝并写相邻
+  sanitized ERROR；精确 replay 不新增事件，不公开未提交 FINAL，不进入 v3 writer。
+
+本轮已按授权冻结备份并实际恢复验证 `1|0|5`（案件/证据/运行），MinIO tar 206 entries。
+JFR、浏览器截图、4 个数据库 dump 和 tar 保存在该 run evidence 中。官方 teardown 仅移除
+该 run 的 23 containers / 14 networks / 8 volumes；旧主环境仍健康运行。当前正在重新验证，
+尚未把此轮或后续新环境声明为 E2E PASS，尚未推送。
+
+Python 定向回归 81 PASS / 15 deselected，覆盖真实 Harness 的状态 schema/prompt/context 与
+零额外模型调用的 checkpoint replay。额外尝试整个 prompt_composer 测试文件时，三条既有
+Evidence/旧 Intake 提示词文本断言不匹配（3 failed / 87 passed 后停止），并非本轮定向门通过；
+不将此结果描述成全套测试绿。
+
+真实数据库门 `AgentRunV4FinalizationRejectionIntegrationTest` 1/1 PASS：使用同一 PostgreSQL16
+digest 和全部正式 Flyway migrations，真实 JPA/ledger/v4 writer/stream delivery；仅不调用的
+v3 writer 是 mock。验证 caller rollback 恢复 RESULT_READY 且没有 ERROR，正式提交产生唯一
+相邻 v4 ERROR，run/attempt/高水位同步，重复调用不新增事件，冲突拒绝后仍可精确重放。
+
+最终 Java 定向门 36/36 PASS（另有上述真实数据库 1/1 PASS），0 failure/error/skip：
+
+```powershell
+./mvnw.cmd "-Dtest=JpaAgentRunV4FinalizationFailureTest,JpaAgentRunLedgerProtocolTest,PostgresAgentRunV4EventWriterTest,IntakeParallelFrameAssemblerTest,AgentRunStreamEventServiceTest#rejectedV4FinalStaysHiddenWhileItsAdjacentSanitizedErrorIsReplayable+v4FinalRemainsHiddenUntilFormalCommit+matchingFormalCommitMakesV4FinalVisible+v4ReplayUsesAnAttemptScopedCursorAndPreservesTypedFramePayloads" test
+./mvnw.cmd "-Dtest=AgentRunV4FinalizationRejectionIntegrationTest" test
+python -m pytest tests/graphs/intake/test_parallel_outputs.py tests/graphs/intake/test_parallel_graph.py tests/harness/test_prompt_composer.py -q --disable-warnings -k 'parallel or dialogue or frozen_dossier or dossier or quality or frame'
+```
+
+测试编写期间修正过缺失 import、误用与 fixture 相同的“错误”hash、过窄的异常文案断言；
+以上数字均为修正后实际执行结果，不使用中途失败结果充当通过。没有关闭正式校验或增加重试。

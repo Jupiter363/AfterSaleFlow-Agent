@@ -687,6 +687,21 @@ class IntakeFrameModelInputV2(_SelfHashedParallelModel):
         """Return only this task's bounded model view, never sibling authority."""
 
         lane = _without_provider_hashes(self.lane_model_context.model_dump(mode="json"))
+        if self.frame_type == "DOSSIER_FRAME":
+            phase = self.common_model_context.previous_state.persisted_phase
+            if phase not in {"NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"}:
+                raise ValueError("Dossier provider phase cannot accept a ROOM_MESSAGE")
+            if phase != "NOT_READY":
+                # Remark prose belongs to Dialogue/Java handoff notes, not the
+                # frozen substantive dossier. Do not expose facts or write keys.
+                return {
+                    "contract_version": "intake.frame-provider-input.v2",
+                    "frame_type": self.frame_type,
+                    "lane_model_context": {
+                        "contract_version": "intake.frozen-dossier-context.v1",
+                        "persisted_phase": phase,
+                    },
+                }
         if self.frame_type == "DIALOGUE_FRAME":
             # Preserve the sealed full context/checkpoint reader. Only the new
             # provider projection is phase-specific; prose cannot select a phase.

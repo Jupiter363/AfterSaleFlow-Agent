@@ -2251,6 +2251,7 @@ async def test_ready_invitation_stream_omits_provider_null_and_replays_stable_fr
     requests, contexts = _requests_and_contexts(IntakeModelContextViewV1.seal(payload))
     outputs = _outputs()
     outputs["intake_turn_dialogue_frame"]["public_projection_items"][0]["segment_kind"] = "TRANSITION"
+    outputs["intake_turn_dossier_frame"] = {"public_projection_items": []}
     runner = _StreamingRunner(outputs)
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())
@@ -2297,6 +2298,8 @@ async def test_dialogue_phase_reaches_real_harness_with_trimmed_context_and_repl
     dialogue["public_projection_items"][0]["segment_kind"] = segment_kind
     if disposition is not None:
         dialogue["dialogue"] = {"remark_disposition": disposition}
+    if phase != "NOT_READY":
+        outputs["intake_turn_dossier_frame"] = {"public_projection_items": []}
 
     class RecordingProvider:
         def __init__(self):
@@ -2348,6 +2351,18 @@ async def test_dialogue_phase_reaches_real_harness_with_trimmed_context_and_repl
     assert replay.all_succeeded
     assert replay.completed["DIALOGUE_FRAME"].result == result.completed["DIALOGUE_FRAME"].result
     assert len(provider.calls) == 3  # replay does not ask any model again
+    dossier_call = next(call for call in provider.calls if call["node_name"] == "intake_turn_dossier_frame")
+    assert dossier_call["output_type"].intake_dossier_phase == phase
+    if phase != "NOT_READY":
+        dossier_request = next(request for request in requests if request.frame_type == "DOSSIER_FRAME")
+        assert dossier_request.model_input.provider_payload()["lane_model_context"] == {
+            "contract_version": "intake.frozen-dossier-context.v1", "persisted_phase": phase,
+        }
+        assert "fact_key.enum" not in dossier_call["system_prompt"]
+        assert "本任务唯一输出" in dossier_call["system_prompt"]
+        assert result.completed["DOSSIER_FRAME"].result.public_projection_items == ()
+        assert result.completed["DOSSIER_FRAME"].result.dossier_delta.respondent_claim is None
+        assert replay.completed["DOSSIER_FRAME"].result == result.completed["DOSSIER_FRAME"].result
 
 
 def test_ready_pending_respondent_selects_optional_no_delta_dossier_schema() -> None:
@@ -2376,9 +2391,6 @@ def test_ready_pending_respondent_selects_optional_no_delta_dossier_schema() -> 
 
     assert output_type.model_validate(
         {
-            "respondent_attitude": None,
-            "respondent_position_summary": None,
-            "respondent_alternative_proposal": None,
             "public_projection_items": [],
         }
     )

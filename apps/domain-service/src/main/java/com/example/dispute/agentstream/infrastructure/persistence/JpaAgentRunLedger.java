@@ -436,6 +436,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         AgentRunAttemptStatus terminalStatus = command.publicOutputEmitted()
                 ? AgentRunAttemptStatus.ABORTED
                 : AgentRunAttemptStatus.FAILED;
+        boolean parallel = AgentRunProtocol.V4.wireValue().equals(run.getProtocol());
+        if (parallel) {
+            requireV4FinalizationPredecessor(run, command);
+        }
         boolean attemptReplayed = attempt.recordFinalizationFailure(
                 command.agentRunId(),
                 command.attemptNo(),
@@ -446,7 +450,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 command.publicOutputEmitted(),
                 terminalStatus,
                 command.safeErrorCode());
-        boolean runReplayed = run.recordV3FinalizationFailure(
+        boolean runReplayed = parallel ? run.recordV4FinalizationFailure(
+                command.attemptId(), command.resultHash(), terminalStatus,
+                command.safeErrorCode(), attempt.getCompletedAt().toInstant())
+                : run.recordV3FinalizationFailure(
                 command.attemptId(),
                 command.resultHash(),
                 terminalStatus,
@@ -459,6 +466,22 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
         entityManager.flush();
         long terminalSequenceNo = Math.addExact(command.finalSequenceNo(), 1L);
+        if (parallel) {
+            V4AudienceBinding binding = requireV4AudienceBinding(run);
+            Instant terminalAt = attempt.getCompletedAt().toInstant();
+            var eventReceipt = v4EventWriter.appendOrLoadExactTerminalInCurrentTransaction(
+                    new PostgresAgentRunV4EventWriter.EventWriteCommand(
+                            v4FailureEventId(attempt, binding, terminalSequenceNo, terminalAt, command.safeErrorCode()),
+                            run.getId(), attempt.getId(), terminalSequenceNo,
+                            AgentStreamEventV4.EventType.ERROR, binding.audience(), terminalAt,
+                            AgentStreamEventV4.Payload.errorPayload(command.safeErrorCode(), false),
+                            binding.actorId(), binding.audienceActorIdsJson()));
+            requireEqual(eventReceipt.durableHighWatermark(), terminalSequenceNo, "v4FinalizationErrorHighWatermark");
+            requireEqual(eventReceipt.inserted(), !attemptReplayed, "v4FinalizationErrorReplay");
+            return new AgentRunFinalizationFailureRecorder.Receipt(
+                    command.agentRunId(), command.attemptId(), command.resultHash(),
+                    terminalSequenceNo, terminalStatus, command.safeErrorCode(), attemptReplayed);
+        }
         AgentStreamEvent terminalError = new AgentStreamEvent(
                 "agent-stream.v3",
                 command.agentRunId(),
@@ -494,6 +517,27 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 terminalStatus,
                 command.safeErrorCode(),
                 attemptReplayed);
+    }
+
+    private void requireV4FinalizationPredecessor(
+            AgentRunEntity run, AgentRunFinalizationFailureRecorder.Command command) {
+        var row = eventRepository.findV4Event(command.agentRunId(), command.attemptId(), command.finalSequenceNo())
+                .orElseThrow(() -> new IllegalStateException("v4 finalization rejection requires an exact hidden FINAL"));
+        try {
+            JsonNode document = streamObjectMapper.readTree(row.getPayloadJson());
+            AgentStreamEventV4 event = streamObjectMapper.treeToValue(document, AgentStreamEventV4.class);
+            requireEqual(row.getPayloadHash(), ContractJson.sha256Hex(document), "v4FinalizationPredecessorHash");
+            requireEqual(row.getStreamProtocol(), AgentRunProtocol.V4.wireValue(), "v4FinalizationPredecessorProtocol");
+            requireEqual(row.getEventType(), "final", "v4FinalizationPredecessorType");
+            requireEqual(event.eventType(), AgentStreamEventV4.EventType.FINAL, "v4FinalizationPredecessorDiscriminator");
+            requireEqual(event.runId(), command.agentRunId(), "v4FinalizationPredecessorRun");
+            requireEqual(event.attemptId(), command.attemptId(), "v4FinalizationPredecessorAttempt");
+            requireEqual(event.sequenceNo(), command.finalSequenceNo(), "v4FinalizationPredecessorSequence");
+            requireEqual(event.payload().finalResultHash(), command.resultHash(), "v4FinalizationPredecessorResult");
+            requireEqual(event.audience(), requireV4AudienceBinding(run).audience(), "v4FinalizationPredecessorAudience");
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("v4 finalization predecessor is malformed", exception);
+        }
     }
 
     @Override

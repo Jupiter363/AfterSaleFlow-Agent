@@ -252,6 +252,7 @@ class PromptComposer:
         allow_profile_fallback: bool = False,
         trusted_agent_context: dict[str, Any] | None = None,
         intake_dialogue_phase: str | None = None,
+        intake_dossier_phase: str | None = None,
     ) -> tuple[str, str]:
         """返回 (system_prompt, user_prompt)。
 
@@ -264,6 +265,7 @@ class PromptComposer:
             allow_profile_fallback=allow_profile_fallback,
             trusted_agent_context=trusted_agent_context,
             intake_dialogue_phase=intake_dialogue_phase,
+            intake_dossier_phase=intake_dossier_phase,
         )
         user_prompt = self.render_user_prompt(case_data, output_schema)
         return system_prompt, user_prompt
@@ -280,6 +282,7 @@ class PromptComposer:
         allow_profile_fallback: bool = False,
         trusted_agent_context: dict[str, Any] | None = None,
         intake_dialogue_phase: str | None = None,
+        intake_dossier_phase: str | None = None,
     ) -> str:
         """拼接系统提示词。
 
@@ -288,6 +291,7 @@ class PromptComposer:
         """
 
         phase_path = self._dialogue_phase_path(node_name, intake_dialogue_phase)
+        frozen_dossier_path = self._frozen_dossier_path(node_name, intake_dossier_phase)
         # 列表推导式会按 COMMON_FRAGMENT_FILES 的固定顺序读取每个通用规则文件。
         fragments = [
             self._read_required(self._harness_prompt_dir / filename)
@@ -326,12 +330,23 @@ class PromptComposer:
             prompt_profile_id=prompt_profile_id,
             allow_profile_fallback=allow_profile_fallback,
         )
-        fragments.append(self._read_required(base_template_path))
-        if selected_template_path != base_template_path:
+        fragments.append(self._read_required(frozen_dossier_path or base_template_path))
+        if frozen_dossier_path is None and selected_template_path != base_template_path:
             fragments.append(self._read_required(selected_template_path))
         if phase_path is not None:
             fragments.append(self._read_required(phase_path))
         return "\n\n".join(fragment.strip() for fragment in fragments if fragment.strip())
+
+    def _frozen_dossier_path(self, node_name: str, phase: str | None) -> Path | None:
+        if phase is None:
+            return None  # Historical/unbound callers retain their original prompt.
+        if node_name != "intake_turn_dossier_frame" or phase not in {
+            "NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK",
+        }:
+            raise PromptResourceError("Dossier prompt requires an explicit supported phase")
+        if phase == "NOT_READY":
+            return None
+        return self._agent_prompt_root / "dispute_intake_officer" / "intake_turn_dossier_frozen.md"
 
     def _dialogue_phase_path(self, node_name: str, phase: str | None) -> Path | None:
         """Select a server-owned variant, never a path/phase from message text."""
@@ -409,6 +424,8 @@ class PromptComposer:
             self._read_required(self._harness_prompt_dir / filename)
         resolved: list[Path] = []
         for node_name in requested:
+            if node_name == "intake_turn_dossier_frame":
+                self._read_required(self._frozen_dossier_path(node_name, "WAITING_FOR_REMARK"))
             if node_name == "intake_turn_dialogue_frame":
                 for phase in INTAKE_DIALOGUE_PHASE_TEMPLATES:
                     self._read_required(self._dialogue_phase_path(node_name, phase))
@@ -459,6 +476,10 @@ class PromptComposer:
                     for phase in INTAKE_DIALOGUE_PHASE_TEMPLATES
                 },
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+        if node_name == "intake_turn_dossier_frame":
+            frame_prompt += "\n" + self._read_required(
+                self._frozen_dossier_path(node_name, "WAITING_FOR_REMARK")
             )
         return common_authority, frame_prompt
 

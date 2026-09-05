@@ -117,6 +117,10 @@ public final class IntakeParallelFrameAssembler {
                 previous,
                 command.actorRole(),
                 command.sourceEventHash());
+        if (!"NOT_READY".equals(previousPhase)
+                && (!dossier.dossierPatch().isEmpty() || dossier.matrixPatch() != null)) {
+            throw invalid("post-threshold Dossier Frame cannot change frozen substantive authority");
+        }
         QualityOutcome quality = reconcileQualityGaps(
                 proposedQuality,
                 dossier.matrixPatch(),
