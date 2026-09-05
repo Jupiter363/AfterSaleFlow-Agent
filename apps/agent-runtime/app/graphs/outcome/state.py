@@ -16,6 +16,9 @@ from app.graphs.outcome.errors import OutcomeReviewContractError
 from app.schemas import ReviewCopilotAnswer, ReviewCopilotRequest
 
 
+# Frozen inputs share the signed room-object exchange's 512 KiB bound; they
+# include the full evidence/draft packet, not just the compact advisory result.
+MAX_OUTCOME_REVIEW_REQUEST_BYTES = 512 * 1024
 MAX_OUTCOME_REVIEW_ENCODED_BYTES = 32_768
 MAX_OUTCOME_REVIEW_REFS = 256
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -423,7 +426,7 @@ def _validate_request_binding(
         )
     except (TypeError, ValueError) as error:
         raise OutcomeReviewContractError("OUTCOME_REVIEW_REQUEST_NOT_SERIALIZABLE") from error
-    if request_bytes > MAX_OUTCOME_REVIEW_ENCODED_BYTES:
+    if request_bytes > MAX_OUTCOME_REVIEW_REQUEST_BYTES:
         raise OutcomeReviewContractError("OUTCOME_REVIEW_REQUEST_TOO_LARGE")
     if (
         request.case_id != command.case_id
@@ -442,6 +445,7 @@ def _validate_request_binding(
 
 
 __all__ = [
+    "MAX_OUTCOME_REVIEW_REQUEST_BYTES",
     "MAX_OUTCOME_REVIEW_ENCODED_BYTES",
     "MAX_OUTCOME_REVIEW_REFS",
     "OutcomeReviewGraphStateV1",

@@ -2,9 +2,9 @@
 
 ## 最新状态（2026-09-06）
 
-前轮真实模型浏览器 UAT 曾到达 CLOSED/OUTCOME；终审解释官 mTLS 已验证，辅助记录 JDBC
-时间绑定也已修复。最新 `3262547d` 轮发现备注阶段 Dossier 越权和 v4 失败收口缺口，已定位修复，
-正在重新验证；完整验收暂不通过，未推送。
+真实模型浏览器 UAT 已验证双方按状态备注、上传/庭审和终审解释官 mTLS；页面到达 OUTCOME。
+`d02028cf` 轮的最终辅助记录被错误的输入大小上限拒绝，已拆开完整冻结输入与紧凑输出的边界，
+定向回归 34/34 通过，等待重新完成浏览器和后台收敛验收；完整验收暂不通过，未推送。
 以下保留各轮原始失败和修复记录，不能将早期结论理解为最新进度。
 
 ## 首轮结论（历史）
@@ -517,3 +517,35 @@ python -m pytest tests/graphs/intake/test_parallel_outputs.py tests/graphs/intak
 
 测试编写期间修正过缺失 import、误用与 fixture 相同的“错误”hash、过窄的异常文案断言；
 以上数字均为修正后实际执行结果，不使用中途失败结果充当通过。没有关闭正式校验或增加重试。
+
+### 2026-09-06：冻结终审输入大小与输出边界分离
+
+源码 `d02028cffd4123f865316292867392d0aaf8af85`、隔离 run `p9-b3dedde8706b`：
+
+- 首案在无备注回复后出现 `GRAPH_PROVIDER_STREAM_INTERRUPTED`，仅 Dialogue frame 失败，
+  Dossier/Quality 已 SEALED。已保留截图与数据库，不重试；现有日志无法进一步区分网络中断、
+  缺失结束事件或 provider 终止原因，不能归因于 Schema，也不能宣称零模型/传输错误。
+- 新表单创建 `CASE_P9_SYNTHETIC_2`，八次 Intake 均 COMPLETED/COMMITTED，双方邀请和
+  无备注阶段事实矩阵分别保持不变；两份明确虚构的证据完成上传/解析，五项庭审焦点双方回答，
+  未回答方看不到对方本轮内容。双方无补证后完成冻结、V1/评审/V2。
+- 终审解释官 `AGENT_RUN_1ac15c9a6de545fea0e243ff75075ec0` COMPLETED/LEGACY_COMMITTED。
+  人工明确纠正“放弃其他权利”等草案措辞，只批准冻结计划唯一 `TARGET_NO_EXTERNAL_EFFECT`，
+  preconditions/notifications 均为空；不产生退款/补发或其他外部业务效果。
+- ReviewTask `hearing-review-task-666c79f398573c7280472da3373501da` APPROVED，页面事件
+  `ACT_ef48ac65ecfc789b30b39069bb1fc5fb`；但辅助运行
+  `target-review-run:a637d299cf78395daaf01ba9e04ba93c` FAILED/UNCOMMITTED，故不计完整通过。
+
+Python `outcome/state.py::_validate_request_binding` 在模型调用前抛出
+`OUTCOME_REVIEW_REQUEST_TOO_LARGE`。冻结材料仅 draft/claims 等已超过 47KB，却复用输出的
+32KiB 上限；Java 和 Python 既有签名 room-object 输入交换支持 512KiB。这是确定性边界错配，
+不是本次模型抖动。修复独立设置输入 512KiB，仍按规范化 UTF-8 字节校验；完整材料不截断、
+不重写 hash，输出保持 32KiB，正式权限/角色/引用/哈希/重放校验不变。
+
+`python -m pytest tests/graphs/outcome -q --disable-warnings`：34 PASS。新增九个参数化回归
+覆盖 48KB/512KiB 完整图执行、超界 UTF-8 拒绝、四种权限漂移拒绝、checkpoint 无敏感正文、
+已投影重放零模型调用，以及输出仍超过 32KiB 即拒绝。48KB 正例在旧实现先真实复现同一异常。
+
+本轮另外保留两项观察，不混称已修复：并发进入证据室时预期 revision 已被另一命令占用，
+UI 把 admission 冲突显示为模型失败；确认无本方命令且对方提交完成后才重新进入。
+终审/结果的通用“继续履约”显示与唯一 NO_EXTERNAL_EFFECT 计划不一致，不能从 UI 标签推导
+实际外部执行；V2 模型建议仍需人工核实，没有绕过终审授权。
