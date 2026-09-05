@@ -4,6 +4,7 @@
 
 - 只使用 `lane_model_context` 中当前参与方的 `source_capacity`、`frozen_case_matrix`、合法 fact-key namespace 和 `current_user_message`。
 - 只提取当前消息实际表达的事实、本人观点或本人回应；不得替另一方生成直接立场。
+- 保留本人陈述的范围、否定和时间限定。“本次不申请退款/赔偿”不等于“放弃权利”，请求核验也不等于接受处理结果；除非本人明确表达，不得增加放弃、免责、和解或最终结清含义。
 - `frozen_case_matrix` 是既有事实的唯一历史视图。本轮未更新的事实不要复制，不要重新归因到当前消息。
 
 单一输出权威：

@@ -4277,6 +4277,46 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  it("reads the persisted direct matrix response without reusing the stale dossier mirror", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const memory = partyScopedTurnMemory({ merchantScore: 90, merchantReady: true });
+    memory.case_intake_dossier.dossier.case_fact_matrix.claims = {
+      respondent_direct: {
+        source_type: "RESPONDENT_DIRECT_INTAKE",
+        respondent_role: "MERCHANT",
+        attitude: "AGREE",
+        position_summary: "商家确认拣货错误，愿意提交出库记录核验。",
+        source_refs: ["MESSAGE_MERCHANT_DIRECT"],
+      },
+    };
+    const wrapper = await mountInteractiveView({ initialTurnMemory: memory });
+    expect(wrapper.get("[data-dispute-detail-card]").text()).toContain("商家确认拣货错误");
+    expect(wrapper.get("[data-dispute-detail-card]").text()).not.toContain("商家尚未回应");
+    wrapper.unmount();
+    const replay = await mountInteractiveView({ initialTurnMemory: structuredClone(memory) });
+    expect(replay.get("[data-dispute-detail-card]").text()).toContain("商家确认拣货错误");
+  });
+
+  it.each(["wrong-role", "reported", "no-source", "unknown-schema", "initiator-view"])(
+    "does not promote unauthorized matrix response: %s", async (boundary) => {
+      actor.id = boundary === "initiator-view" ? "user-local" : "merchant-local";
+      actor.role = boundary === "initiator-view" ? "USER" : "MERCHANT";
+      const memory = partyScopedTurnMemory();
+      const matrix = memory.case_intake_dossier.dossier.case_fact_matrix;
+      matrix.claims = { respondent_direct: {
+        source_type: boundary === "reported" ? "INITIATOR_REPORTED" : "RESPONDENT_DIRECT_INTAKE",
+        respondent_role: boundary === "wrong-role" ? "USER" : "MERCHANT",
+        attitude: "AGREE",
+        position_summary: "不可跨权限显示的回应文本",
+        source_refs: boundary === "no-source" ? [] : ["MESSAGE_DIRECT"],
+      } };
+      if (boundary === "unknown-schema") matrix.schema_version = "case_fact_matrix.v99";
+      const wrapper = await mountInteractiveView({ initialTurnMemory: memory });
+      expect(wrapper.get("[data-dispute-detail-card]").text()).not.toContain("不可跨权限显示的回应文本");
+    },
+  );
+
   it("keeps the legacy v1 dossier visible without lending completeness to the respondent", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";

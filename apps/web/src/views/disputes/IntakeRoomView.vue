@@ -1348,13 +1348,36 @@ function partySubject(label, fallback) {
 function respondentNoResponseText(respondent) {
   return `${partySubject(respondent, "对方")}尚未回应`;
 }
+function currentRespondentAttitude(detail) {
+  const matrix = detail?.case_fact_matrix;
+  const direct = matrix?.claims?.respondent_direct;
+  const respondentRole = resolveRespondentRole(detail);
+  if (
+    matrix?.schema_version === "case_fact_matrix.v2" &&
+    ["INITIATOR_FROZEN", "BILATERAL_FROZEN"].includes(matrix.matrix_kind) &&
+    direct?.source_type === "RESPONDENT_DIRECT_INTAKE" &&
+    direct.respondent_role === respondentRole &&
+    ["AGREE", "PARTIALLY_AGREE", "DISAGREE", "ALTERNATIVE_PROPOSED", "NEED_MORE_INFO"].includes(direct.attitude) &&
+    Array.isArray(direct.source_refs) && direct.source_refs.length > 0 &&
+    direct.source_refs.every((ref) => typeof ref === "string" && ref.trim()) &&
+    typeof direct.position_summary === "string" && direct.position_summary.trim()
+  ) {
+    return {
+      respondent_role: direct.respondent_role,
+      attitude: direct.attitude,
+      position: direct.position_summary,
+      source: "RESPONDENT_DIRECT_INTAKE",
+    };
+  }
+  return detail?.respondent_attitude || {};
+}
 const claimStatus = computed(() => {
   const detail = caseDetailDossier.value;
   if (!detail) {
     return null;
   }
   const claim = detail.claim_resolution || {};
-  const attitude = detail.respondent_attitude || {};
+  const attitude = currentRespondentAttitude(detail);
   const core = detail.dispute_core_state || {};
   const initiatorRole = normalizePartyRoleValue(
     claim.initiator_role || initiatorRoleValue.value,
@@ -1478,11 +1501,11 @@ const allVerificationGaps = computed(() => {
   const missing = detail.missing_information || {};
   const respondentRole = resolveRespondentRole(
     detail,
-    detail.respondent_attitude || {},
+    currentRespondentAttitude(detail),
   );
   const respondentState = inferRespondentAttitude(
     detail,
-    detail.respondent_attitude || {},
+    currentRespondentAttitude(detail),
     respondentRole,
   );
   const candidates = [

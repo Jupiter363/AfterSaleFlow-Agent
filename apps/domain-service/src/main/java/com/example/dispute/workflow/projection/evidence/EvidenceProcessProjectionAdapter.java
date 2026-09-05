@@ -418,7 +418,9 @@ public class EvidenceProcessProjectionAdapter {
                 ? null
                 : activeRun.expectedOperationKey(row.caseId(), row.projectionRoomEpoch());
         return new EvidenceProcessProjectionView(
-                        EvidenceProcessProjectionView.SCHEMA_VERSION,
+                        "TEMPORAL".equals(normalized(row.writerMode()))
+                                ? EvidenceProcessProjectionView.PRODUCTION_SCHEMA_VERSION
+                                : EvidenceProcessProjectionView.SCHEMA_VERSION,
                         "0".repeat(64),
                         projectionState,
                         row.tenantSurrogate(),

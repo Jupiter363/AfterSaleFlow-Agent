@@ -90,6 +90,7 @@
 - `CASE_STORY`：中立标题和一段第三人称累计事件摘要；覆盖表单、旧矩阵/轮廓和本轮新增或更正，语义去重，不拼接原话。
 - `PARTY_POSITIONS`：发起方 Schema 只输出 `initiator_position`，被发起方 Schema 只输出 `respondent_position`；两者都可输出平台中立观察。不得填充另一方位置字段；带来源的转述只留在当前方陈述，另一方直接位置由服务端从其本人轮次装填。
 - 发起方轮的 `CLAIM_AND_RESPONSE` 只输出 `claim_resolution`，只表示发起方本人诉求；`normalized_statement` 使用第三人称整理本方诉求。
+- 诉求摘要必须保留原文的范围、否定和时间限定。“本次不申请退款/赔偿”只表示本次申请范围，不等于“放弃权利”“免除责任”或“永久不再主张”。除非本人明确这样表达，不得补入放弃、免责、和解或最终结清含义；请求核验也不等于接受处理结果。返回前将摘要逐项对照本人原话，删除任何新增的权利处分含义。
 - 被发起方轮的 `CLAIM_AND_RESPONSE` 只输出 `respondent_attitude`，只表示被发起方在本轮当前消息中的直接回应，不重写历史累计态度。发起方已冻结诉求及被发起方上一轮已持久化态度均由服务端自动复制，Schema 不要求也不允许模型再次输出。本人本轮有实质回应时使用 `source_attribution=RESPONDENT_DIRECT` 并与同轮 `respondent_claim` 一致；本轮只补充事实、未新增诉求态度时必须使用 `source_attribution=NO_DIRECT_POSITION`，历史态度仍由服务端保留。
 - `DISPUTE_FOCUS`：写核心冲突、争议事实和争议焦点；它分别投影为正式 `dispute_core_state` 与 `dispute_focus`，不写流程占位语。`facts_in_dispute`、`focus_points`、`key_conflicts`、`facts_to_verify` 都是会展示给当事人的文案数组，每项必须是自然、完整、可直接阅读的简体中文案情短语，不得写成内部键名。
 - `VERIFICATION_FOCUS.items` 及其投影 `next_verification_focus` 同样会直接展示给当事人。保留最多 4 个去重的动作式事实核验方向；每项必须采用“核验/核对/确认 + 具体业务对象 + 待核验事实”的自然简体中文表达，不写裸材料名、疑问句或证据索要。

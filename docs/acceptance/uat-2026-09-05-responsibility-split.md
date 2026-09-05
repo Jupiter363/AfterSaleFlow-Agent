@@ -180,3 +180,133 @@ node node_modules/vite/bin/vite.js build
   提交镜像，不能把这次构建当作新入口或业务 E2E 的通过证明。
 
 尚待以统一入口实际启动并完成浏览器业务验收；未推送。
+
+## 统一入口与真实浏览器 E2E（2026-09-06 00:42—01:01）
+
+### 被测快照及边界
+
+- 分支：`codex/large-file-responsibility-split`。
+- 精确候选：`1b5923c0e28bfe1ad51c83f1c4997e2a3e736985`，测试前工作树干净。
+- 固定入口：`python tools/uat/production-runtime/start.py`。
+- 隔离 run：`p9-56e5404bd5de`；浏览器入口 `http://127.0.0.1:25180/disputes`。
+- namespace：`after-sale-flow-p9-p9-56e5404bd5de`；CONTROL build：`p9-control-1b5923c0`。
+- 统一入口首次启动及同 run 再次执行均返回成功；基础设施 readiness 通过。
+  这仍只是 `INFRASTRUCTURE_READY_ONLY`，不是业务 E2E 通过。
+- 本轮独自使用 Codex 内置浏览器：表单创建、双方切换、陈述、确认、文件选择与上传
+  均通过实际页面；只读接口/数据库用于核对结果。没有 API 代替 UI 写入，没有手工改数据库、
+  Temporal history、流程状态或模型结果，没有升级或重启既有核心组件。
+
+### 新案件与执行结果
+
+案件 `CASE_P9_SYNTHETIC_1`，订单 `UAT-20260906-CUP-01`，用户 `user-local`，
+商家 `merchant-local`。场景为虚构的 49 元蓝色陶瓷杯错发白色；本案仅申请核验与解释，
+不发起真实退款、补发、赔偿或其他财务动作。
+
+| 验收步骤 | 结果及证据 |
+| --- | --- |
+| 表单创建新案 | 通过，浏览器返回新案件接待室 |
+| 用户补充、确认、商家独立接待与确认 | 流转通过；6 条 INTAKE run 全部 `COMPLETED/COMMITTED`，attempt 无 error |
+| 接待内容准确性 | **失败**：用户明确否认放弃权利后，回复承诺纠正，但诉求卡片刷新后仍显示“放弃其他经济补偿诉求” |
+| 接待室进入证据室 | 通过，双方封存后进入证据室 |
+| 证据开场 Graph/正式提交 | 通过，run `target-evidence-run:b551dd3feb373555bf4e6db2d8050f49` 为 `COMPLETED/COMMITTED`，模型 attempt 成功 |
+| 证据室状态展示 | **失败/阻塞**：状态接口持续 HTTP 400，页面误报“证据书记官生成失败” |
+| 商家上传与文件解析 | 存储/解析通过：POST HTTP 201，后续 GET 返回解析后的完整文本；UI 未正确确认成功 |
+| 双方证据批次、庭审、评审、结果 | **未执行**：不得绕过证据状态门继续 |
+
+### 阻塞 E2E-01：真实模型 profile 被只读投影硬编码拒绝
+
+实际浏览器请求：
+
+```text
+GET /api/disputes/CASE_P9_SYNTHETIC_1/evidence/process-projection?view=active
+HTTP 400 / INVALID_ARGUMENT
+details.reason = target modelProfileId must equal production-runtime.contract-blocked
+```
+
+`EvidenceProcessProjectionAdapter.targetPins()` 已先核对 activation 的精确 runtime pins，
+但 `EvidenceProcessProjectionView.VersionPins.target()` 又强制 model profile 等于
+`production-runtime.contract-blocked`；`hasTargetComposite()` 也重复同一限制。
+固定启动配置的真实模型 profile 为
+`qwen3.8-flash.uat.9c5016a2af54c00a57ce41e6cf6e35ec9e8d22f8deadd03ebc3c2eb5d4f70ae9.v1`。
+因此真实模型正常运行后，读取证据室投影反而确定性失败。
+
+- 违反不变量：已由 activation 验证的同一模型配置，应被正式执行和正式状态读取一致接受。
+- 不是本次证据开场模型失败：其账本明确 `COMPLETED/COMMITTED`，
+  `public_output_emitted=true`、`final_frame_observed=true`，无 error code。
+- `git diff main -- EvidenceProcessProjectionView.java`（完整源码路径）为空，
+  `git show main:<path>` 仍有相同硬编码。这是当前真实模型装配暴露的既有契约缺口，
+  不能归因于本次职责拆分。
+- 待修复边界：统一接收经 activation 精确绑定的合法模型 profile；保留缺失、非法、
+  跨配置不一致的拒绝路径，不通过关闭校验或改为“禁用模型”掩盖。
+- 所需最小回归：`EvidenceProcessProjectionAdapterTest` 增加真实 profile 正例、
+  错误 activation/profile 负例和原 contract-blocked 邻接；修复后复跑同入口浏览器流程。
+
+### 连带缺陷 E2E-02：上传成功与刷新失败合并为上传失败
+
+浏览器只发出一次文件上传，201 响应的证据 ID 为
+`EVIDENCE_7d0cfcc6e44f4943b6110d8cd30d4337`，原文件 `warehouse-dispatch.txt`，
+848 bytes，SHA-256 `a306300b7232541ed949f8b4f80bfee3e0575108aa47a368713c5382a31d5757`。
+后续 GET catalog 已有该条 `PENDING_SUBMISSION` 及解析文本；材料内明确声明是软件 UAT
+模拟记录，不是真实业务凭证。
+
+`EvidenceRoomView.vue` 的 `confirmEvidenceUpload()` 把 POST 和后续 `refreshWorkspace()`
+包在同一 catch；后者的 `Promise.all` 被 E2E-01 的 400 拒绝，导致成功目录不发布、弹窗不清空，
+再次显示“确认声明并上传”。这会误导用户重复上传。
+
+- 违反不变量：已成功提交的上传回执不能因后续 GET 失败而被展示成未提交。
+- 本轮未点击第二次上传，关闭弹窗后保留唯一证据记录；未删除、补写或伪造提交状态。
+- 待修复边界：区分上传事务结果与刷新失败；保留成功证据 ID，刷新失败时只能重读，
+  不能引导同文件重新 POST。投影未知时依然禁止越过业务授权门。
+- 所需最小回归：201 + projection GET 400 的前端回归，断言上传只调用一次、成功回执不丢失，
+  并覆盖正常上传及真实 POST 失败相邻行为。
+
+### 内容缺陷 E2E-03：已明确纠正的诉求未同步到卡片
+
+初始“不申请退款、赔偿或补发”被扩写为“放弃其他经济补偿诉求”。用户随后两轮明确反对，
+最终回复承诺纠正，案件摘要已记载纠正，但持久化重新加载后诉求卡片仍是旧句；
+商家完成陈述后其回应卡片也仍显示“尚未直接陈述”。这是可复现的内容一致性失败。
+当前仅证明症状及非页面缓存，尚未证明责任在模型分支、合并器还是卡片选用字段；
+不得归类为随机模型抖动或直接用前端字符串替换掩盖。
+
+下一修复需对照每轮 proposal 与正式 dossier，验证“本次未申请”不会被升级为权利放弃，
+且明确纠正能同步到权威字段及 UI，并保留对方不能篡改发起方诉求的负例。
+
+### 本轮判定与现场保留
+
+**结论：E2E 已实际执行，但未通过；完整六阶段验收被 E2E-01 阻塞，禁止据此推送/发布。**
+不将基础设施健康、7 次 Graph 正式成功或单次上传成功等同于完整业务稳定。
+
+内置浏览器保留当前案件证据室；测试数据库、7 条 run、唯一待提交证据未清理。
+截图保存在本机私有运行目录：
+`C:/Users/Jupiter/.after-sale-flow/production-runtime-local/p9-56e5404bd5de/evidence/e2e-evidence-blocked.png`。
+本轮只新增该验收记录及私有测试材料/截图，没有修改生产源码，未提交或推送。
+
+## 2026-09-06：阻塞修复候选（尚不构成 E2E 通过）
+
+- E2E-01：新增显式 `evidence-process-projection.v2` 读取契约，TEMPORAL 投影允许
+  exact activation 绑定的真实模型 profile；保留 v1 冻结文件及 blocked-profile 边界。
+  见 ADR 0019。未改数据库、Workflow 历史或正式写入权限。
+- E2E-02：上传 201 后立即保留证据回执、清理提交草稿；后续 GET 失败单独提示，
+  锁定依赖投影的写入，只允许 GET 刷新，不再次 POST。切换角色后不泄露旧回执。
+- E2E-03 已定位：初始生成摘要把“本次不申请”扩大成权利放弃，冻结矩阵也承接了该摘要；
+  后续并行事实增量没有重写冻结诉求的权限，回复不得声称已经修改正式卡片。
+  为初始摘要及并行 Frame 增加否定/范围保留与禁止虚假修改承诺的提示词约束。
+  历史错误不作字符串替换或手工 DML；新模型行为仍须新案件 E2E 验证。
+- 商家直接回应已存在于 `case_fact_matrix.v2.claims.respondent_direct`，但旧卡片只读
+  `respondent_attitude`。改为优先读取有 exact role、直接来源及 source refs 的正式矩阵回应，
+  保留发起方不可查看对方私有回应及旧卷宗兼容边界。
+
+最小回归实跑：
+
+- `EvidenceProcessProjectionAdapterTest`：21/21 PASS（含 schema/hash/replay/activation 负例）。
+  一条旧 SQL 文本断言从 epoch 别名同步为实际的 candidate 子查询别名，查询本身未改。
+- `tests/static/test_evidence_projection_v2.py`：10/10 PASS。
+- `EvidenceRoomView.test.js` 定向 selector：7/7 PASS，其余 75 项未运行。
+- `IntakeRoomView.test.js` 定向 selector：7/7 PASS，其余 88 项未运行。
+- 提示词组合定向 pytest：4/4 PASS；这仅证明提示词装配，不证明模型生成稳定。
+- Vite production build PASS（保留既有大 chunk 警告）；`git diff --check` PASS。
+
+用户已明确授权：备份后按原版本重建这一套隔离 UAT，旧主环境不动。
+备份目标为旧 run 私有 evidence 目录下 `backup-before-rebuild`，包含 Domain/Graph/Temporal
+两库导出、MinIO 原始对象以及校验回执；重建通过正式 `start.py`，不升级核心组件。
+候选可本地提交以绑定镜像源码；在新浏览器全流程通过之前不得推送/声明生产可发布。

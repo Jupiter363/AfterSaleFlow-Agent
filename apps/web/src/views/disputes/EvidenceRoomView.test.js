@@ -2743,6 +2743,95 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
   });
 
+  it("accepts an explicit v2 live model profile without relaxing v1 or unknown schemas", async () => {
+    const live = targetTemporalProjection(1, { schema_version: "evidence-process-projection.v2" });
+    live.version_pins.model_profile_id = `qwen3.8-flash.uat.${"9".repeat(64)}.v1`;
+    const { wrapper } = await mountView({ initialProcessProjection: live });
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
+    expect(wrapper.get("[data-evidence-process-projection]").attributes("data-projection-mode"))
+      .toBe("PRODUCTION");
+    wrapper.unmount();
+    for (const [schema, profile] of [
+      ["evidence-process-projection.v1", live.version_pins.model_profile_id],
+      ["evidence-process-projection.v3", live.version_pins.model_profile_id],
+      ["evidence-process-projection.v2", ""],
+      ["evidence-process-projection.v2", "model/invalid"],
+      ["evidence-process-projection.v2", " model.v1"],
+      ["evidence-process-projection.v2", null],
+    ]) {
+      const invalid = { ...live, schema_version: schema,
+        version_pins: { ...live.version_pins, model_profile_id: profile } };
+      const rejected = await mountView({ initialProcessProjection: invalid });
+      expect(rejected.wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(true);
+      rejected.wrapper.unmount();
+    }
+  });
+
+  it("keeps a successful upload receipt when projection refresh fails and retries only GET", async () => {
+    const projection = targetTemporalProjection(1);
+    const { wrapper } = await mountView({ initialProcessProjection: projection });
+    await prepareUploadDeclaration(wrapper);
+    evidenceApi.upload.mockResolvedValueOnce({ id: "EVIDENCE_UPLOADED_ONCE" });
+    evidenceApi.processProjection.mockRejectedValueOnce(new Error("projection unavailable"));
+    await wrapper.get("[data-evidence-upload-form]").trigger("submit");
+    await flushPromises();
+
+    expect(evidenceApi.upload).toHaveBeenCalledTimes(1);
+    expect(wrapper.find("[data-evidence-upload-modal]").exists()).toBe(false);
+    expect(wrapper.get("[data-evidence-upload-receipt]").text()).toContain("EVIDENCE_UPLOADED_ONCE");
+    expect(wrapper.get("[data-evidence-upload-receipt]").text()).toContain("不要重复上传");
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(true);
+    expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(true);
+    evidenceApi.processProjection.mockResolvedValueOnce(projection);
+    await wrapper.get("[data-retry-evidence-refresh]").trigger("click");
+    await flushPromises();
+    expect(evidenceApi.upload).toHaveBeenCalledTimes(1);
+    expect(wrapper.find("[data-retry-evidence-refresh]").exists()).toBe(false);
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
+    expect(wrapper.get("[data-evidence-upload-receipt]").text()).toContain("EVIDENCE_UPLOADED_ONCE");
+    wrapper.unmount();
+  });
+
+  it("keeps a genuinely rejected upload editable without inventing a success receipt", async () => {
+    const { wrapper } = await mountView();
+    await prepareUploadDeclaration(wrapper);
+    evidenceApi.upload.mockRejectedValueOnce(new Error("upload rejected"));
+    await wrapper.get("[data-evidence-upload-form]").trigger("submit");
+    await flushPromises();
+    expect(wrapper.get("[data-evidence-upload-modal]").text()).toContain("upload rejected");
+    expect(wrapper.find("[data-evidence-upload-receipt]").exists()).toBe(false);
+    expect(evidenceApi.upload).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("does not leak an upload receipt into another party workspace", async () => {
+    const uploaded = deferred();
+    const { wrapper } = await mountView();
+    await prepareUploadDeclaration(wrapper);
+    evidenceApi.upload.mockReturnValueOnce(uploaded.promise);
+    await wrapper.get("[data-evidence-upload-form]").trigger("submit");
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await flushPromises();
+    uploaded.resolve({ id: "EVIDENCE_USER_RECEIPT_PRIVATE" });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("EVIDENCE_USER_RECEIPT_PRIVATE");
+    expect(wrapper.find("[data-evidence-upload-receipt]").exists()).toBe(false);
+    expect(evidenceApi.upload).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  async function prepareUploadDeclaration(wrapper) {
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    const input = wrapper.get("[data-evidence-upload-file]");
+    Object.defineProperty(input.element, "files", {
+      value: [new File(["synthetic test evidence"], "receipt.txt", { type: "text/plain" })],
+      configurable: true,
+    });
+    await input.trigger("change");
+    await wrapper.get("[data-evidence-claimed-fact]").setValue("用于核验本测试案件的订单与出库颜色是否一致。");
+    await wrapper.get("[data-evidence-truth-attested]").setValue(true);
+  }
+
   it("locks target writes when the public target profile is incomplete", async () => {
     const invalid = targetTemporalProjection(1);
     invalid.version_pins.graph_version = "production-runtime-graph.drifted";

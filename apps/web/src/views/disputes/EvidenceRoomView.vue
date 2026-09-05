@@ -64,6 +64,9 @@ const router = useRouter();
 const catalog = ref(props.initialCatalog);
 const completion = ref(props.initialCompletion);
 const processProjection = ref(props.initialProcessProjection);
+const projectionRefreshFailed = ref(false);
+const uploadedEvidenceReceipt = ref(null);
+const uploadRefreshWarning = ref("");
 const uploading = ref(false);
 const submittingBatch = ref(false);
 const completing = ref(false);
@@ -163,9 +166,19 @@ const signedSyntheticProjection = computed(() =>
   processProjection.value?.real_case_shadow_allowed === false &&
   projectionManifestItemCount.value !== null,
 );
+const targetProjectionSchema = computed(() =>
+  processProjection.value?.schema_version || processProjection.value?.schemaVersion,
+);
+const targetProjectionModelValid = computed(() => {
+  const profile = projectionVersionPins.value?.model_profile_id;
+  if (targetProjectionSchema.value === "evidence-process-projection.v1") {
+    return profile === "production-runtime.contract-blocked";
+  }
+  return targetProjectionSchema.value === "evidence-process-projection.v2" &&
+    typeof profile === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(profile);
+});
 const targetTemporalProjection = computed(() =>
-  (processProjection.value?.schema_version || processProjection.value?.schemaVersion) ===
-    "evidence-process-projection.v1" &&
+  targetProjectionModelValid.value &&
   projectionRuntimeMode.value === "PRODUCTION" &&
   projectionWriterMode.value === "TEMPORAL" &&
   processProjection.value?.formal_sink_allowed === false &&
@@ -177,7 +190,6 @@ const targetTemporalProjection = computed(() =>
   projectionVersionPins.value?.checkpoint_schema_version === "production-runtime-checkpoint.v2" &&
   projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
   projectionVersionPins.value?.prompt_version === "all-rooms-prompt.production-runtime.v2" &&
-  projectionVersionPins.value?.model_profile_id === "production-runtime.contract-blocked" &&
   projectionVersionPins.value?.assessment_output_schema_version ===
     "evidence-item-assessment.v1" &&
   projectionVersionPins.value?.terminal_output_schema_version ===
@@ -226,6 +238,7 @@ const projectionDisplay = computed(() => {
   };
 });
 const projectionWriteLocked = computed(() =>
+  projectionRefreshFailed.value ||
   projectionReadOnly.value ||
   projectionState.value === "FAILED" ||
   projectionRecoveryState.value !== "NONE" ||
@@ -1487,7 +1500,12 @@ async function refreshWorkspace(options = {}) {
     evidenceApi.processProjection(actorSnapshot, caseSnapshot, {
       historyMode: historyMode.value,
     }),
-  ]);
+  ]).catch((failure) => {
+    if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      projectionRefreshFailed.value = true;
+    }
+    throw failure;
+  });
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
     return false;
   }
@@ -1499,6 +1517,8 @@ async function refreshWorkspace(options = {}) {
   }
   completion.value = nextCompletion;
   processProjection.value = nextProjection;
+  projectionRefreshFailed.value = false;
+  uploadRefreshWarning.value = "";
   messages.value = nextMessages;
   if (options.streamBoard) {
     await streamCatalogToBoard(nextCatalog, {
@@ -1851,12 +1871,15 @@ async function confirmEvidenceUpload() {
     return;
   }
   const file = pendingUploadFile.value;
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   uploading.value = true;
   error.value = "";
   uploadDeclarationError.value = "";
   agentState.value = "THINKING";
   try {
-    await evidenceApi.upload(effectiveActor.value, caseId.value, {
+    const receipt = await evidenceApi.upload(actorSnapshot, caseSnapshot, {
       file,
       evidenceType: file.type.startsWith("video/")
         ? "VIDEO"
@@ -1867,17 +1890,40 @@ async function confirmEvidenceUpload() {
       claimedFact,
       truthAttested: true,
     });
-    await refreshWorkspace();
-    agentState.value = "LISTENING";
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+    uploadedEvidenceReceipt.value = { id: receipt.id, filename: file.name };
+    // Once POST succeeds, discard the draft before any fallible GET. Never offer a re-POST.
     resetEvidenceUploadDraft();
     uploadDeclarationOpen.value = false;
     closeModal("upload");
+    agentState.value = "LISTENING";
+    try {
+      await refreshWorkspace({ generation });
+    } catch (failure) {
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      projectionRefreshFailed.value = true;
+      uploadRefreshWarning.value = "文件已上传，状态刷新失败。请刷新状态，不要重复上传。";
+    }
   } catch (failure) {
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     error.value = failure.message;
     uploadDeclarationError.value = failure.message;
     agentState.value = "ERROR";
   } finally {
     uploading.value = false;
+  }
+}
+
+async function retryUploadedEvidenceRefresh() {
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
+  try {
+    await refreshWorkspace({ generation });
+  } catch {
+    if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      uploadRefreshWarning.value = "文件已上传，状态仍不可用。请稍后刷新状态，不要重复上传。";
+    }
   }
 }
 
@@ -2057,6 +2103,9 @@ watch(role, async (nextRole, previousRole) => {
   const generation = workspaceGeneration;
   error.value = "";
   streamError.value = "";
+  uploadedEvidenceReceipt.value = null;
+  uploadRefreshWarning.value = "";
+  projectionRefreshFailed.value = false;
   agentState.value = "THINKING";
   submittingBatch.value = false;
   catalog.value = null;
@@ -2102,6 +2151,8 @@ watch(historyMode, (historical) => {
   cancelBoardStream();
   workspaceGeneration += 1;
   uploading.value = false;
+  uploadedEvidenceReceipt.value = null;
+  uploadRefreshWarning.value = "";
   resetEvidenceUploadDraft();
   intakeFactRows.value = [];
   uploadDeclarationOpen.value = false;
@@ -2203,6 +2254,13 @@ onBeforeUnmount(() => {
             <span class="evidence-kicker">EVIDENCE BOARD</span>
             <h2>已提交证据</h2>
             <p>点击任意证据卡片查看核验结果与人工复核信息。</p>
+            <aside v-if="uploadedEvidenceReceipt" data-evidence-upload-receipt role="status">
+              <p>已上传：{{ uploadedEvidenceReceipt.filename }}</p>
+              <small v-if="uploadedEvidenceReceipt.id">证据编号：{{ uploadedEvidenceReceipt.id }}</small>
+              <p v-if="uploadRefreshWarning">{{ uploadRefreshWarning }}</p>
+              <button v-if="uploadRefreshWarning" type="button" data-retry-evidence-refresh
+                @click="retryUploadedEvidenceRefresh">刷新状态</button>
+            </aside>
             <aside
               v-if="projectionDisplay"
               class="evidence-process-projection"

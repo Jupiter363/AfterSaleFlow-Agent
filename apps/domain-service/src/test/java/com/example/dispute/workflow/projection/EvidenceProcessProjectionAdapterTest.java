@@ -109,7 +109,7 @@ class EvidenceProcessProjectionAdapterTest {
                                 "viewer.status = 'ACTIVE'",
                                 "viewer.permission_scopes_json",
                                 "participant.participant_status = 'ACTIVE'",
-                                "epoch.room_type = 'EVIDENCE'",
+                                "candidate.room_type = 'EVIDENCE'",
                                 "production_runtime_room_epoch_binding target_binding",
                                 "production_runtime_case_reservation target_reservation",
                                 "production_runtime_activation target_activation",
@@ -558,7 +558,7 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.versionPins())
                 .isEqualTo(VersionPins.target(
                         "control-build-p9",
-                        "production-runtime-graph.2026-08-18.1",
+                        "production-runtime-graph.2026-08-18.3",
                         "production-runtime-checkpoint.v2",
                         "all-rooms-prompt.production-runtime.v2",
                         "production-runtime.contract-blocked",
@@ -567,6 +567,57 @@ class EvidenceProcessProjectionAdapterTest {
                         "tools.none.v1"));
         assertSelfHash(view);
         assertFrozenSchemaValid(view);
+    }
+
+    @Test
+    void liveModelProfileUsesExplicitV2AndKeepsActivationAndV1Boundaries() throws Exception {
+        String liveProfile = "qwen3.8-flash.uat." + "9".repeat(64) + ".v1";
+        TargetIntakeRuntimePins livePins = runtimePins(liveProfile, "b".repeat(64));
+        EvidenceProcessProjectionAdapter liveAdapter = new EvidenceProcessProjectionAdapter(
+                mock(NamedParameterJdbcOperations.class), livePins);
+        AuthenticatedActor viewer = actor(ActorRole.MERCHANT);
+        ProjectionRow row = row(viewer, "TEMPORAL", "tenant-run001", "QA_TARGET_0042",
+                "ROOM_P9_EVIDENCE_42", false, false, "OPEN", "ACTIVE", pendingState(), PROJECTED_AT);
+        EvidenceProcessProjectionView view = liveAdapter.adapt(row, viewer);
+
+        assertThat(view.schemaVersion()).isEqualTo("evidence-process-projection.v2");
+        assertThat(view.versionPins().modelProfileId()).isEqualTo(liveProfile);
+        assertThat(view).isEqualTo(liveAdapter.adapt(row, viewer));
+        assertSelfHash(view);
+        assertFrozenSchemaValid(view);
+
+        ObjectNode wrongDiscriminator = JSON.valueToTree(view);
+        wrongDiscriminator.put("schema_version", EvidenceProcessProjectionView.SCHEMA_VERSION);
+        assertThatThrownBy(() -> JSON.treeToValue(wrongDiscriminator, EvidenceProcessProjectionView.class))
+                .hasMessageContaining("v1 target modelProfileId");
+        wrongDiscriminator.withObject("version_pins")
+                .put("model_profile_id", "production-runtime.contract-blocked");
+        assertThat(JSON.treeToValue(wrongDiscriminator, EvidenceProcessProjectionView.class)
+                .schemaVersion()).isEqualTo(EvidenceProcessProjectionView.SCHEMA_VERSION);
+
+        EvidenceProcessProjectionAdapter foreignActivation = new EvidenceProcessProjectionAdapter(
+                mock(NamedParameterJdbcOperations.class), runtimePins(liveProfile, "c".repeat(64)));
+        assertThatThrownBy(() -> foreignActivation.adapt(row, viewer))
+                .hasMessageContaining("profile pins differ from the active activation");
+        for (String invalid : Arrays.asList(null, "", " model.v1", "model/v1", "x".repeat(129))) {
+            assertThatThrownBy(() -> VersionPins.target("control-build-p9",
+                    "production-runtime-graph.2026-08-18.3", "production-runtime-checkpoint.v2",
+                    "all-rooms-prompt.production-runtime.v2", invalid,
+                    "all-rooms-policy.production-runtime.v1", "all-rooms-guardrail.production-runtime.v1",
+                    "tools.none.v1")).hasMessageContaining("modelProfileId");
+        }
+        ObjectNode shadowAsV2 = serializedShadowProjection();
+        shadowAsV2.put("schema_version", EvidenceProcessProjectionView.PRODUCTION_SCHEMA_VERSION);
+        assertThatThrownBy(() -> JSON.treeToValue(shadowAsV2, EvidenceProcessProjectionView.class))
+                .hasMessageContaining("v2 writerMode");
+    }
+
+    private static TargetIntakeRuntimePins runtimePins(String modelProfile, String bindingHash) {
+        TargetIntakeRuntimePins pins = TARGET_RUNTIME_PINS;
+        return new TargetIntakeRuntimePins(pins.caseBuildId(), pins.agentBuildId(), bindingHash,
+                pins.graphCodeBuildId(), pins.isolatedDomainDbBindingHash(), pins.agentProfileId(),
+                pins.promptVersion(), modelProfile, pins.executionProviderId(), pins.policyVersion(),
+                pins.guardrailVersion(), pins.toolPolicyVersion(), pins.memoryPolicyVersion(), pins.envelopeKeyId());
     }
 
     @Test
@@ -766,7 +817,7 @@ class EvidenceProcessProjectionAdapterTest {
 
         assertThatThrownBy(() -> VersionPins.target(
                         "control-build-p9",
-                        "production-runtime-graph.2026-08-18.1",
+                        "production-runtime-graph.2026-08-18.3",
                         "production-runtime-checkpoint.v2",
                         "evidence-prompt.v2",
                         "production-runtime.contract-blocked",
@@ -1008,7 +1059,7 @@ class EvidenceProcessProjectionAdapterTest {
                         "ATTEMPT_P5_ONE_1",
                         "MANIFEST_P5_ONE",
                         "a".repeat(64),
-                        target ? "production-runtime-graph.2026-08-18.1" : "evidence.v2.0.0",
+                        target ? "production-runtime-graph.2026-08-18.3" : "evidence.v2.0.0",
                         target ? "production-runtime-checkpoint.v2" : "evidence-checkpoint.v2",
                         "RUNNING")
                 : null;
@@ -1031,7 +1082,7 @@ class EvidenceProcessProjectionAdapterTest {
                 legacy ? null : 7L,
                 legacy ? null : 9L,
                 legacy ? null : target ? "control-build-p9" : "evidence-workflow.synthetic.v1",
-                legacy ? null : target ? "production-runtime-graph.2026-08-18.1" : "evidence.v2.0.0",
+                legacy ? null : target ? "production-runtime-graph.2026-08-18.3" : "evidence.v2.0.0",
                 legacy ? null : target ? "production-runtime-checkpoint.v2" : "evidence-checkpoint.v2",
                 targetAuthority,
                 activeRun,
@@ -1088,7 +1139,7 @@ class EvidenceProcessProjectionAdapterTest {
                 "control-build-p9",
                 "agent-build-p9",
                 "all-rooms.production-runtime.v2",
-                "production-runtime-graph.2026-08-18.1",
+                "production-runtime-graph.2026-08-18.3",
                 "production-runtime-checkpoint.v2",
                 "b".repeat(64),
                 "graph-code-p9",
@@ -1126,7 +1177,7 @@ class EvidenceProcessProjectionAdapterTest {
                 roomId == null ? null : roomRevision,
                 roomId == null ? null : fencingToken,
                 roomId == null ? null : "control-build-p9",
-                roomId == null ? null : "production-runtime-graph.2026-08-18.1",
+                roomId == null ? null : "production-runtime-graph.2026-08-18.3",
                 roomId == null ? null : "production-runtime-checkpoint.v2",
                 authority,
                 false,
@@ -1179,7 +1230,12 @@ class EvidenceProcessProjectionAdapterTest {
     }
 
     private static void assertFrozenSchemaValid(EvidenceProcessProjectionView view) throws IOException {
-        Set<?> errors = frozenProjectionSchema().validate(JSON.valueToTree(view));
+        JsonSchema schema = EvidenceProcessProjectionView.PRODUCTION_SCHEMA_VERSION.equals(view.schemaVersion())
+                ? JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012).getSchema(
+                        JSON.readTree(Files.readString(Path.of("..", "..", "contracts", "agent-platform",
+                                "evidence", "projection", "v2", "evidence-process-projection.schema.json"))))
+                : frozenProjectionSchema();
+        Set<?> errors = schema.validate(JSON.valueToTree(view));
         assertThat(errors).isEmpty();
     }
 

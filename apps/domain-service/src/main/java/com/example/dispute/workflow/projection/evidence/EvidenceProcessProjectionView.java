@@ -53,6 +53,7 @@ public record EvidenceProcessProjectionView(
         @JsonFormat(shape = JsonFormat.Shape.STRING) OffsetDateTime projectedAt) {
 
     public static final String SCHEMA_VERSION = "evidence-process-projection.v1";
+    public static final String PRODUCTION_SCHEMA_VERSION = "evidence-process-projection.v2";
     public static final String AVAILABLE = "AVAILABLE";
     public static final String PROCESSING = "PROCESSING";
     public static final String UNAVAILABLE = "UNAVAILABLE";
@@ -65,7 +66,7 @@ public record EvidenceProcessProjectionView(
     private static final ObjectMapper JSON = JsonMapper.builder().findAndAddModules().build();
 
     public EvidenceProcessProjectionView {
-        requireEquals(schemaVersion, SCHEMA_VERSION, "schemaVersion");
+        requireEnum(schemaVersion, Set.of(SCHEMA_VERSION, PRODUCTION_SCHEMA_VERSION), "schemaVersion");
         requireHash(projectionHash, "projectionHash");
         requireEnum(
                 projectionState,
@@ -124,6 +125,13 @@ public record EvidenceProcessProjectionView(
         requireNonNegative(lastEventSequence, "lastEventSequence");
         requireNonNull(recovery, "recovery");
         requireNonNull(versionPins, "versionPins");
+        if (PRODUCTION_SCHEMA_VERSION.equals(schemaVersion)) {
+            requireEquals(writerMode, "TEMPORAL", "v2 writerMode");
+        } else if ("TEMPORAL".equals(writerMode)) {
+            // Preserve the frozen v1 reader; activation-bound live profiles use explicit v2.
+            requireEquals(versionPins.modelProfileId(), "production-runtime.contract-blocked",
+                    "v1 target modelProfileId");
+        }
         requireNonNegative(processRevision, "processRevision");
         requireNonNegative(roomRevision, "roomRevision");
         requireNonNull(projectedAt, "projectedAt");
@@ -586,10 +594,9 @@ public record EvidenceProcessProjectionView(
                     promptVersion,
                     "all-rooms-prompt.production-runtime.v2",
                     "target promptVersion");
-            requireEquals(
-                    modelProfileId,
-                    "production-runtime.contract-blocked",
-                    "target modelProfileId");
+            // The adapter binds this opaque identifier to the active deployment profile.
+            // A view must not replace that authority with a hard-coded disabled provider.
+            requireIdentifier(modelProfileId, "target modelProfileId");
             requireEquals(
                     policyVersion,
                     "all-rooms-policy.production-runtime.v1",
@@ -627,7 +634,7 @@ public record EvidenceProcessProjectionView(
                             checkpointSchemaVersion)
                     && "evidence-graph-state.v2".equals(stateSchemaVersion)
                     && "all-rooms-prompt.production-runtime.v2".equals(promptVersion)
-                    && "production-runtime.contract-blocked".equals(modelProfileId)
+                    && IDENTIFIER.matcher(modelProfileId).matches()
                     && "evidence-item-assessment.v1".equals(assessmentOutputSchemaVersion)
                     && "evidence-batch-proposal.v1".equals(terminalOutputSchemaVersion)
                     && "all-rooms-policy.production-runtime.v1".equals(policyVersion)

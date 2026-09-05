@@ -87,6 +87,17 @@ def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -
     }
 
 
+def test_intake_prompts_preserve_claim_scope_without_promising_frozen_writes() -> None:
+    repository = PromptRepository()
+    for node in ("intake_turn_case_detail", "intake_turn_dossier_frame", "intake_turn_dialogue_frame"):
+        prompt = repository.render_system_prompt(node)
+        assert "本次不申请退款/赔偿" in prompt
+        assert "不等于“放弃权利”" in prompt
+    dialogue = repository.render_system_prompt("intake_turn_dialogue_frame")
+    assert "没有修改冻结诉求的权限" in dialogue
+    assert "只能确认收到本轮更正" in dialogue
+
+
 def test_intake_verification_focus_prompts_require_public_chinese_actions() -> None:
     repository = PromptRepository()
     baseline = repository.render_system_prompt("intake_turn_case_detail")
