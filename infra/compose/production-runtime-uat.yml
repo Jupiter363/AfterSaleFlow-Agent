@@ -58,6 +58,8 @@ x-java-environment: &java-environment
   PRODUCTION_RUNTIME_INTAKE_AGENT_PROFILE_ID: ${PRODUCTION_RUNTIME_GRAPH_AGENT_PROFILE_ID:?}
   PRODUCTION_RUNTIME_INTAKE_PROMPT_VERSION: ${PRODUCTION_RUNTIME_GRAPH_PROMPT_VERSION:?}
   PRODUCTION_RUNTIME_INTAKE_MODEL_PROFILE_ID: ${PRODUCTION_RUNTIME_GRAPH_MODEL_PROFILE_ID:?}
+  # Existing Python LiteLLMClient.governed_provider identifier (not a new gateway).
+  PRODUCTION_RUNTIME_INTAKE_EXECUTION_PROVIDER_ID: litellm
   PRODUCTION_RUNTIME_INTAKE_POLICY_VERSION: ${PRODUCTION_RUNTIME_GRAPH_POLICY_VERSION:?}
   PRODUCTION_RUNTIME_INTAKE_GUARDRAIL_VERSION: ${PRODUCTION_RUNTIME_GRAPH_GUARDRAIL_VERSION:?}
   PRODUCTION_RUNTIME_INTAKE_TOOL_POLICY_VERSION: ${PRODUCTION_RUNTIME_GRAPH_TOOL_POLICY_VERSION:?}
@@ -363,6 +365,22 @@ services:
       timeout: 5s
       retries: 20
 
+  model-gateway:
+    image: ${PRODUCTION_RUNTIME_NGINX_IMAGE:?immutable image digest required}
+    labels: *runtime-labels
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${PRODUCTION_RUNTIME_PUBLIC_DIR:?}/model-gateway.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+    networks: [python-egress, model-egress]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/healthz | grep -qx ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   python-agent-service:
     image: ${PRODUCTION_RUNTIME_PYTHON_IMAGE:?immutable image digest required}
     labels: *runtime-labels
@@ -373,9 +391,11 @@ services:
       - umask 000; rm -f /run/production-runtime/python/agent.sock; exec uvicorn production_runtime_mtls_adapter:create_app --factory --uds /run/production-runtime/python/agent.sock --no-server-header
     environment:
       APP_ENV: production-runtime
-      LITELLM_BASE_URL: http://model-contract-blocker:4000
-      LITELLM_MODEL: production-runtime.contract-blocked
+      LITELLM_BASE_URL: http://model-gateway:4000
+      LITELLM_MODEL: ${PRODUCTION_RUNTIME_MODEL:-qwen3.8-flash}
       LITELLM_MASTER_KEY: ${PRODUCTION_RUNTIME_LOCAL_MODEL_KEY:?}
+      LLM_ENABLE_THINKING: "false"
+      LLM_STRICT_JSON_SCHEMA_ENABLED: "true"
       LANGFUSE_ENABLED: "false"
       LANGFUSE_HOST: http://observability-contract-blocker:3000
       LANGFUSE_PUBLIC_KEY: production-runtime-disabled
@@ -419,6 +439,8 @@ services:
       graph-restore-validation:
         condition: service_completed_successfully
       jwks-server:
+        condition: service_healthy
+      model-gateway:
         condition: service_healthy
     networks: [python-egress]
     healthcheck:
@@ -807,6 +829,9 @@ networks:
   python-egress:
     name: aflow_production_runtime_${PRODUCTION_RUNTIME_RUN_ID:?}_python_egress
     internal: true
+    labels: *resource-labels
+  model-egress:
+    name: aflow_production_runtime_${PRODUCTION_RUNTIME_RUN_ID:?}_model_egress
     labels: *resource-labels
   graph-exchange:
     name: aflow_production_runtime_${PRODUCTION_RUNTIME_RUN_ID:?}_graph_exchange

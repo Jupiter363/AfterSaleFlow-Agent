@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import ledger  # noqa: E402
+import model_config  # noqa: E402
 
 
 FORBIDDEN_BASELINE_PORTS = {5173, 8080, 18000, 18010, 18080}
@@ -49,6 +50,7 @@ ALLOWED_URL_HOSTS = {
     "ocr-parser-service",
     "frontend",
     "model-contract-blocker",
+    "model-gateway",
     "observability-contract-blocker",
     "java-callback-contract-blocker",
     "127.0.0.1",
@@ -141,6 +143,7 @@ def validate_rendered_config(
         "graph-migrate": "python",
         "graph-restore-validation": "python",
         "jwks-server": "nginx",
+        "model-gateway": "nginx",
         "graph-exchange-proxy": "nginx",
         "graph-mtls-proxy": "nginx",
         "python-agent-service": "python",
@@ -281,12 +284,37 @@ def validate_rendered_config(
         "minio",
         "jwks-server",
         "graph-exchange-proxy",
+        "model-gateway",
     }:
         raise common.ProductionError(
             "Python egress network exposes an unexpected business service"
         )
     if any(name.startswith("java-") for name in python_network_members):
         raise common.ProductionError("Python can reach a Java business endpoint")
+
+    model = services["model-gateway"]
+    expected_model_mount = {
+        "type": "bind",
+        "source": str(Path(env["PRODUCTION_RUNTIME_PUBLIC_DIR"]) / "model-gateway.conf"),
+        "target": "/etc/nginx/conf.d/default.conf",
+        "read_only": True,
+    }
+    model_mounts = model.get("volumes", [])
+    if (
+        _networks(model) != {"python-egress", "model-egress"}
+        or model.get("environment")
+        or len(model_mounts) != 1
+        or any(
+            (Path(model_mounts[0].get(key, "")).resolve() != Path(value).resolve())
+            if key == "source" else model_mounts[0].get(key) != value
+            for key, value in expected_model_mount.items()
+        )
+        or {name for name, service in services.items() if "model-egress" in _networks(service)}
+        != {"model-gateway"}
+        or python_environment.get("LITELLM_BASE_URL") != "http://model-gateway:4000"
+        or config["networks"]["python-egress"].get("internal") is not True
+    ):
+        raise common.ProductionError("model gateway isolation or exact mount drifted")
 
     published_ports: set[int] = set()
     for service in services.values():
@@ -384,6 +412,7 @@ def run_preflight(env_file: Path) -> dict[str, Any]:
         raise common.ProductionError("image lock does not match the atomic host lock")
     run_context = common.load_json(Path(env["PRODUCTION_RUNTIME_RUN_CONTEXT_PATH"]))
     context = common.validate_run_context_bindings(run_context, env, lock)
+    model_config.validate_provisioned_model(env, run_context)
     if context["run_context_hash"] != env["PRODUCTION_RUNTIME_RUN_CONTEXT_HASH"]:
         raise common.ProductionError("run context hash does not match the env file")
     projection = run_context["runtime_projection"]

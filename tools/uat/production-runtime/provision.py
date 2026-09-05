@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import hashes
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import ledger
+import model_config
 import teardown
 
 SYNTHETIC_FIXTURE_SET_ID = "p9-synthetic-all-rooms-001"
@@ -720,7 +721,9 @@ def _write_static_jwks(public_key_path: Path, destination: Path, key_id: str) ->
         destination.chmod(0o444)
 
 
-def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
+def _target_binding(
+    candidate: str, model_profile_id: str = "production-runtime.contract-blocked"
+) -> tuple[dict[str, Any], str]:
     binding = {
         "graph_key": common.PRODUCTION_RUNTIME_GRAPH_KEY,
         "graph_version": common.PRODUCTION_RUNTIME_GRAPH_VERSION,
@@ -733,7 +736,7 @@ def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
         "result_schema_version": "room-graph-result.v1",
         "agent_profile_id": "all-rooms-agent.production-runtime.v1",
         "prompt_version": common.PRODUCTION_RUNTIME_PROMPT_VERSION,
-        "model_profile_id": "production-runtime.contract-blocked",
+        "model_profile_id": model_profile_id,
         "output_schema_version": common.PRODUCTION_RUNTIME_OUTPUT_SCHEMA_VERSION,
         "policy_version": "all-rooms-policy.production-runtime.v1",
         "guardrail_version": "all-rooms-guardrail.production-runtime.v1",
@@ -920,7 +923,9 @@ def provision(
     runtime_root: Path,
     run_id: str | None,
     gateway_port: int,
+    model_env_file: Path | None = None,
 ) -> Path:
+    model = model_config.load_model_configuration(model_env_file)
     docker = _tool("docker")
     openssl = _tool("openssl")
     keytool = _tool("keytool")
@@ -1025,7 +1030,7 @@ def provision(
         )
         ca_fingerprint = ca_certificate.fingerprint(hashes.SHA256()).hex()
 
-        target_binding, binding_hash = _target_binding(candidate)
+        target_binding, binding_hash = _target_binding(candidate, model.profile_id)
         activation_graph_binding, activation_graph_binding_hash = (
             _activation_graph_binding(target_binding)
         )
@@ -1101,8 +1106,15 @@ def provision(
             "PRODUCTION_RUNTIME_LOCAL_MODEL_KEY": _secret(),
             "PRODUCTION_RUNTIME_LOCAL_OBSERVABILITY_KEY": _secret(),
         }
+        if model.mode != "DISABLED":
+            credentials["PRODUCTION_RUNTIME_LOCAL_MODEL_KEY"] = model.api_key
+        _write_public_bytes(
+            public_dir / "model-gateway.conf", model.proxy_configuration.encode("ascii")
+        )
         environment = {
             "PRODUCTION_RUNTIME_RUN_ID": selected_run_id,
+            "PRODUCTION_RUNTIME_MODEL_MODE": model.mode,
+            "PRODUCTION_RUNTIME_MODEL": model_config.MODEL,
             "PRODUCTION_RUNTIME_PROJECT_NAME": project_name,
             "PRODUCTION_RUNTIME_BUILD_ID": candidate,
             "PRODUCTION_RUNTIME_CASE_BUILD_ID": build_bindings["caseBuildId"],
@@ -1495,6 +1507,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--run-id")
     parser.add_argument("--gateway-port", type=int, default=25180)
+    parser.add_argument("--model-env-file", type=Path)
     args = parser.parse_args(argv)
     try:
         env_path = provision(
@@ -1502,6 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
             args.runtime_root,
             args.run_id,
             args.gateway_port,
+            args.model_env_file,
         )
     except common.ProductionError as error:
         parser.error(str(error))

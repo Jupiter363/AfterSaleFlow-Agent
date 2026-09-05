@@ -672,6 +672,7 @@ def test_jwks_is_static_public_only_and_has_no_java_business_surface() -> None:
         "minio",
         "jwks-server",
         "graph-exchange-proxy",
+        "model-gateway",
     }
     assert not any(name.startswith("java-") for name in python_members)
 
@@ -712,6 +713,7 @@ def test_python_to_java_graph_exchange_uses_only_the_restricted_proxy() -> None:
         "minio",
         "jwks-server",
         "graph-exchange-proxy",
+        "model-gateway",
     }
     assert not any(name.startswith("java-") for name in python_members)
 
