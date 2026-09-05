@@ -2,8 +2,8 @@
 
 ## 最新状态（2026-09-06）
 
-接待按阶段修复在 `0d5e2216` 的真实模型浏览器 UAT 中通过，双方上传、庭审、V1/评审/V2
-和人工终审入口均已完成；审核解释官提问发现独立 TLS 装配缺口，完整 E2E 尚未通过，未推送。
+`6625c0e1` 的真实模型浏览器 UAT 已到达 CLOSED/OUTCOME，终审解释官 mTLS 修复也已通过。
+后台审计发现终审辅助记录仍因 JDBC Instant 绑定失败，完整验收暂不通过，未推送。
 以下保留各轮原始失败和修复记录，不能将早期结论理解为最新进度。
 
 ## 首轮结论（历史）
@@ -433,3 +433,35 @@ python -m pytest tests/static/test_phase9_production_runtime_deployment.py -q -k
 
 该 run 按既有授权静默备份：4 个 PostgreSQL dump + MinIO tar；Domain 真恢复计数
 `1|2|20`，归档 286 entries，5 个文件 SHA-256 再核验一致。旧主环境未停止/删除。
+
+### 2026-09-06：终审解释通过，发现辅助记录时间绑定缺陷
+
+被测源码 `6625c0e14489a21c8c7afcc82f0aa619d914e4c7`，隔离 run `p9-ea4d2e19936c`，
+由固定 `start.py` 创建，仍使用原有镜像 digest 和 qwen3.8-flash（thinking=false）。
+浏览器重新表单创建 `CASE_P9_SYNTHETIC_1`；双方接待（包括邀请和无备注）、两份文本上传/解析、
+两项庭审焦点、双方无补证、卷宗冻结、V1/评审/V2、用户只读草案和审核员终审入口均通过。
+商家提交前看不到用户本轮回答。两份材料明确标注虚构 UAT，不冒充原始交易凭证。
+
+终审解释官 `AGENT_RUN_3780779f8c9c4d3581a86c6507fb2434` 为 COMPLETED，真实回复成功，
+没有 TLS 降级。模型指出 V2 回应声称已修订，但正文未落实；这一建议内容质量问题被保留，
+人工理由明确排除限期惩罚、退款、权利放弃及把测试文本当作原始凭证。
+只批准冻结计划中唯一 `TARGET_NO_EXTERNAL_EFFECT`；notifications/preconditions 均为空。
+人工提交一次后，ReviewTask=APPROVED，case=CLOSED/OUTCOME，页面发布事件
+`ACT_a82a33f2a69d7baced3db1b1c0cda143`。这不等于后台全部完成：
+
+- `target-review-run:fde4ccd964b0390d8608dc7bd849623c` 为 FAILED / FINALIZATION_REJECTED。
+- `JdbcTargetReviewAdvisoryProjectionPort.insert` 将 Instant 直接交给 `setObject`，pgjdbc
+  无法推断类型，导致 advisory-only 时间线记录未提交；不是模型 Schema 或生成抖动。
+- 修复仅将 event_time/created_at 转为 UTC OffsetDateTime 后绑定 timestamptz，不改正式决定、
+  时间线序列、事件 hash、事务所有权或重放规则。
+- 新增真实 PostgreSQL 16（同一既有 digest）测试；旧实现首先真实复现同一 PSQLException，
+  不使用无法发现该驱动问题的 PreparedStatement mock。覆盖 UTC 时刻（非 UTC 数据库会话）、
+  精确重放不新增事件或更新时间、冲突拒绝、调用方 rollback 和 autocommit 拒绝。
+
+修复前 run 已静默备份并实际恢复验证 `1|2|21`（案件/证据/运行），MinIO tar 374 entries，
+4 个数据库 dump + tar 保留于该 run 的 `evidence/backup-before-rebuild`。未重试人工决定，
+未覆盖旧失败记录；旧主环境没有改动。必须在新隔离 run 重新完成端到端及后台收敛后才推送。
+
+修复后 `./mvnw.cmd "-Dtest=JdbcTargetReviewAdvisoryProjectionPortTest,TargetReviewContractsTest" test`
+通过 8/8（3 个真实数据库测试 + 5 个邻接合约测试），0 failure/error/skip；旧代码的单个决定性
+回归先因与 live 完全相同的 Instant 类型异常失败。`git diff --check` 通过。

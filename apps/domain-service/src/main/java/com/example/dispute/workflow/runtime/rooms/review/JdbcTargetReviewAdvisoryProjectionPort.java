@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Objects;
 
 /**
@@ -104,8 +105,10 @@ public final class JdbcTargetReviewAdvisoryProjectionPort implements TargetRevie
         """;
     try (PreparedStatement statement = connection.prepareStatement(sql)) {
       statement.setString(1, id); statement.setString(2, caseId); statement.setLong(3, sequence);
-      statement.setString(4, EVENT_TYPE); statement.setObject(5, createdAt); statement.setString(6, eventJson);
-      statement.setString(7, eventKey); statement.setObject(8, createdAt);
+      // pgjdbc supports OffsetDateTime for timestamptz, not Instant via setObject.
+      var timestamp = createdAt.atOffset(ZoneOffset.UTC);
+      statement.setString(4, EVENT_TYPE); statement.setObject(5, timestamp); statement.setString(6, eventJson);
+      statement.setString(7, eventKey); statement.setObject(8, timestamp);
       statement.setString(9, "production-runtime-review-advisory-projection"); statement.executeUpdate();
     }
   }
