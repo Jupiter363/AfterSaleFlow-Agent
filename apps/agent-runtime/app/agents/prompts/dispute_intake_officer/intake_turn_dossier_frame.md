@@ -12,7 +12,7 @@
 - 每一条本轮事实只在 `public_projection_items[*].source_row` 中生成一次；整个数组最多 5 项。普通单条消息默认只输出 1 至 3 项；只有第 4 或第 5 项确实是无法并入同一履约方案、故障表现或处理承诺的独立可核验事实时才增加。绝对不要开始第 6 项。每个 item 只能包含 `source_row`，不得输出 `matrix_patch`、`candidate_value`、slot、路径或协议常量。
 - 每个 `source_row` 严格按 `fact_key`、`fact_target`、`stance`、`position_summary`、`asserted_value` 的顺序各输出一次；`asserted_value` 即使没有短值也必须显式输出 `null`，不要省略字段。`stance` 只能是 `CONFIRM`、`DENY`、`PARTIAL` 或 `UNKNOWN`。不要输出 `category`、`materiality` 或来源范围；它们全部由服务端依据冻结矩阵和 fact-key authority 确定性补齐。
 - 已存在事实只能从 `fact_key_authority.existing_fact_keys` 逐字选择完整 `FACT_` key。`fact_target` 应与冻结矩阵中的目标一致；服务端会恢复该行的既有 `category`、`fact_target`、`materiality`，模型不得创造或改写任何 `FACT_` key。
-- 新增事实的 key 必须以 `fact_key_authority.new_fact_key_prefix` 的完整值开头，再追加简短且本 Frame 内唯一的英文数字下划线后缀。不得使用其他 `NEW_` namespace。
+- 新增事实的完整 key 已由服务端在本轮响应 Schema 的 `fact_key.enum` 中预发放，后缀依次为 1 至 5。只能从枚举逐字复制一个未使用的完整 `NEW_` key，不得自行拼接前缀、另造英文后缀、截短或改写哈希。旧事实同样只从该枚举选择完整 `FACT_` key。输出前逐项确认 key 属于枚举且不重复；诉求范围或权利保留不是待核验事实，不得为了重复诉求而新增事实行。
 - 按当前消息中的事实顺序输出，每个 fact key 只出现一次。`fact_target`、`position_summary` 均不超过 100 个中文字符，`asserted_value` 不超过 60 个中文字符。`position_summary` 必须是可直接展示的简洁中文事实陈述；不要把多个可独立核验的事实挤进一条泛化总结。
 - 服务端会把每个 Provider `source_row` 确定性物化成既有公开 Frame：已有事实恢复冻结分类，新增事实使用保守服务端分类；Java 再依据冻结矩阵、fact-key authority 和同一批物化行补全来源范围并组装现有 `case_fact_matrix.delta.v2`、`summary_source_fact_keys` 和卷宗摘要。模型不要生成这些分类或派生副本。
 

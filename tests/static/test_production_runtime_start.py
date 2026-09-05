@@ -19,6 +19,16 @@ startup = importlib.import_module("start")
 local_config = importlib.import_module("local_config")
 
 
+def test_image_builder_decodes_utf8_diagnostics_independently_of_windows_locale(monkeypatch):
+    builder = importlib.import_module("build_image_lock")
+    def run(arguments, **options):
+        assert options["encoding"] == "utf-8"
+        assert options["shell"] is False
+        return subprocess.CompletedProcess(arguments, 0, "构建完成 ✓", "")
+    monkeypatch.setattr(builder.subprocess, "run", run)
+    assert builder._run(["docker", "version"]).stdout == "构建完成 ✓"
+
+
 def fixture():
     lock = {"run_id": "p9-network-test", "project_name": "aflow-production-runtime-p9-network-test",
             "lock_nonce": "a" * 64, "image_lock_hash": "b" * 64,

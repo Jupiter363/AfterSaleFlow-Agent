@@ -1483,6 +1483,37 @@ async def test_invalid_dossier_source_row_never_emits_a_public_projection() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix,accepted", [("1", True), ("NOT_ISSUED", False)])
+async def test_dossier_issued_fact_key_stream_boundary_and_checkpoint_replay(suffix, accepted):
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    requests, contexts = _requests_and_contexts()
+    outputs = deepcopy(_outputs())
+    row = outputs["intake_turn_dossier_frame"]["public_projection_items"][0]["source_row"]
+    row["fact_key"] = "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_" + suffix
+    row["fact_target"] = "本轮新增商品保管状态"
+    sink = _CollectingSink()
+    runner = _StreamingRunner(outputs)
+    result = await orchestrator.execute(requests, agent_contexts=contexts,
+                                        model_runner=runner, event_sink=sink)
+    dossier_events = [event for event in sink.events
+                      if isinstance(event, FrameProjectionItem) and event.frame_type == "DOSSIER_FRAME"]
+    if not accepted:
+        assert set(result.failed) == {"DOSSIER_FRAME"}
+        assert dossier_events == []
+        assert set(result.completed) == {"DIALOGUE_FRAME", "QUALITY_FRAME"}
+        return
+    assert result.all_succeeded
+    assert len(dossier_events) == 1
+    assert result.completed["DOSSIER_FRAME"].result.public_projection_items[0].source_row.fact_key == row["fact_key"]
+    replay = await orchestrator.execute(requests, agent_contexts=contexts,
+                                        model_runner=runner, event_sink=_CollectingSink())
+    assert replay.all_succeeded
+    assert len(runner.calls) == 3
+
+
+@pytest.mark.asyncio
 async def test_quality_score_cannot_stream_outside_the_fixed_prefix_order() -> None:
     orchestrator = ParallelIntakeFrameOrchestrator(
         compile_parallel_frame_graphs(checkpointer=InMemorySaver())

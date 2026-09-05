@@ -96,6 +96,10 @@ def test_intake_prompts_preserve_claim_scope_without_promising_frozen_writes() -
     dialogue = repository.render_system_prompt("intake_turn_dialogue_frame")
     assert "没有修改冻结诉求的权限" in dialogue
     assert "只能确认收到本轮更正" in dialogue
+    dossier = repository.render_system_prompt("intake_turn_dossier_frame")
+    assert "fact_key.enum" in dossier
+    assert "不得自行拼接前缀" in dossier
+    assert "诉求范围或权利保留不是待核验事实" in dossier
 
 
 def test_intake_verification_focus_prompts_require_public_chinese_actions() -> None:

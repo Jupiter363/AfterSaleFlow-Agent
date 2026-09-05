@@ -89,6 +89,7 @@ def _run(arguments: list[str], *, timeout: int = 3600) -> subprocess.CompletedPr
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         shell=False,
         timeout=timeout,
     )

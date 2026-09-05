@@ -31,7 +31,6 @@ DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH = 20_000
 DOSSIER_POSITION_SUMMARY_MAX_LENGTH = (
     DOSSIER_PERSISTED_SUMMARY_MAX_LENGTH - (DOSSIER_FACT_MAX_ITEMS - 1)
 ) // DOSSIER_FACT_MAX_ITEMS
-DOSSIER_NEW_FACT_SUFFIX_MAX_LENGTH = 32
 
 DialogueSegmentText = Annotated[
     str,
@@ -437,27 +436,17 @@ def request_bound_dossier_output_types(
     if allow_empty_respondent_delta and not respondent_capacity:
         raise ValueError("only a respondent remark can authorize an empty delta")
 
+    # Provider-only narrowing: issue complete NEW_ keys instead of asking the model
+    # to concatenate a request hash with an arbitrary suffix. Stable persisted Frame
+    # readers and the Java-owned namespace checks remain unchanged.
+    issued_new_keys = tuple(
+        f"{new_fact_key_prefix}{index}" for index in range(1, DOSSIER_FACT_MAX_ITEMS + 1)
+    )
     identity = hashlib.sha256(
-        ("\0".join((*existing_fact_keys, new_fact_key_prefix, str(respondent_capacity))))
+        ("\0".join(("ISSUED_FACT_KEYS_V1", *existing_fact_keys, new_fact_key_prefix, str(respondent_capacity))))
         .encode("utf-8")
     ).hexdigest()[:12]
-    new_key_type = Annotated[
-        str,
-        StringConstraints(
-            min_length=len(new_fact_key_prefix) + 1,
-            max_length=(
-                len(new_fact_key_prefix) + DOSSIER_NEW_FACT_SUFFIX_MAX_LENGTH
-            ),
-            pattern=(
-                rf"^{re.escape(new_fact_key_prefix)}[A-Za-z0-9_]"
-                rf"{{1,{DOSSIER_NEW_FACT_SUFFIX_MAX_LENGTH}}}$"
-            ),
-        ),
-    ]
-    fact_key_type: Any = new_key_type
-    if existing_fact_keys:
-        existing_key_type = Literal.__getitem__(existing_fact_keys)
-        fact_key_type = existing_key_type | new_key_type
+    fact_key_type: Any = Literal.__getitem__((*existing_fact_keys, *issued_new_keys))
 
     row_type = create_model(
         f"DossierCurrentFactDraftV5_{identity}",

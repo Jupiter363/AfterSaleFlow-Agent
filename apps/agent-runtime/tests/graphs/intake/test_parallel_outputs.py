@@ -242,8 +242,30 @@ def test_request_bound_dossier_schema_exposes_fact_namespace_and_respondent_capa
         item_type.model_validate(foreign_new)
 
     valid_new = _dossier_provider_frame()["public_projection_items"][0]
-    valid_new["source_row"]["fact_key"] = "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_FACT"
+    valid_new["source_row"]["fact_key"] = "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_1"
     assert item_type.model_validate(valid_new)
+
+    # The actual Provider schema is one finite choice, not a hash-concatenation task.
+    row_schema = next(value for value in item_type.model_json_schema()["$defs"].values()
+                      if "fact_key" in value.get("properties", {}))
+    issued = [f"NEW_AAAAAAAAAAAAAAAAAAAAAAAA_{index}" for index in range(1, 6)]
+    assert row_schema["properties"]["fact_key"]["enum"] == ["FACT_01", *issued]
+    replay_type, _ = request_bound_dossier_output_types(
+        existing_fact_keys=("FACT_01",),
+        new_fact_key_prefix="NEW_AAAAAAAAAAAAAAAAAAAAAAAA_",
+        respondent_capacity=False,
+    )
+    assert replay_type.model_json_schema() == initiator_schema
+    for key in issued:
+        item = _dossier_provider_frame()["public_projection_items"][0]
+        item["source_row"]["fact_key"] = key
+        assert item_type.model_validate(item).source_row.fact_key == key
+    for key in ("NEW_AAAAAAAAAAAAAAAAAAAAAAAA_FACT", "NEW_AAAAAAAAAAAAAAAAAAAAAAAA_6",
+                "NEW_AAAAAAAAAAAAAAAAAAAAAAA_1", "NEW_BBBBBBBBBBBBBBBBBBBBBBBB_1"):
+        item = _dossier_provider_frame()["public_projection_items"][0]
+        item["source_row"]["fact_key"] = key
+        with pytest.raises(ValidationError):
+            item_type.model_validate(item)
 
     initiator_tail = _dossier_provider_frame()
     initiator_tail["dossier_delta"] = {"respondent_claim": {}}

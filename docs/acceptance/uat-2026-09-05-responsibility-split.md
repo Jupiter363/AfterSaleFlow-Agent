@@ -310,3 +310,24 @@ details.reason = target modelProfileId must equal production-runtime.contract-bl
 备份目标为旧 run 私有 evidence 目录下 `backup-before-rebuild`，包含 Domain/Graph/Temporal
 两库导出、MinIO 原始对象以及校验回执；重建通过正式 `start.py`，不升级核心组件。
 候选可本地提交以绑定镜像源码；在新浏览器全流程通过之前不得推送/声明生产可发布。
+
+### 候选 c1ae8cce 的浏览器复测与第二个修复候选
+
+原 run `p9-56e5404bd5de` 已完成四份数据库导出、Domain 实际恢复校验（1 案件/1 证据/7 run），
+MinIO 以完整 tar 保留 140 项（对象名含冒号，不能解包到 Windows 普通目录）。精确 teardown PASS，
+原主环境未动。固定启动入口构建 `c1ae8cce50ea4d2bc16442e74373ac74e4261fc3`，新 run
+`p9-39ae5fea0cab`，全部基础服务 healthy；仍不据此声明 production lane 或 E2E 通过。
+
+浏览器从表单创建新 `CASE_P9_SYNTHETIC_1`。首轮 COMPLETED，摘要为“暂不涉及退款或赔付诉求”，
+没有扩大成放弃权利。用户补充轮 `target-intake-run:7d84fea309c136dbbdd91bcceccc874a` ABORTED：
+Python 日志两次指向 `intake_turn_dossier_frame.public_projection_items[2].source_row.fact_key`，
+同时违反既有 FACT literal 和本轮 NEW 前缀 pattern。未重发该消息，没有提交兜底卷宗。
+截图：该 run 的 `evidence/e2e-dossier-fact-key-failed.png`。
+
+第二修复只收窄 Provider 新生成契约：服务器把本轮前缀派生为最多 5 个完整 NEW key，与已有 FACT
+一起放入一个有限 enum；模型不再自行拼接长哈希。稳定 Frame、Java 命名空间校验和已保存
+checkpoint 的读取/重放保持不变，没有修正或接受越界标识。9 项定向回归通过，覆盖 enum、
+旧事实/双方角色、错误标识零发布、三图并行及 checkpoint 重放零重复 provider 调用。
+
+同时修复镜像构建日志依赖 Windows 默认 GBK 的问题：显式 UTF-8 解码，不改变退出码检查、
+镜像版本或构建权威。第二候选仍须重新部署和完整浏览器验收，未推送。
