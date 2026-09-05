@@ -331,6 +331,7 @@
                             <includes>
                                 <include>**/ProductionArtifactIsolationIT.java</include>
                                 <include>**/ProductionHearingArtifactConfigurationIT.java</include>
+                                <include>**/ProductionActivationStoreAssemblyIT.java</include>
                             </includes>
                             <systemPropertyVariables>
                                 <production.buildDirectory>${project.build.directory}</production.buildDirectory>

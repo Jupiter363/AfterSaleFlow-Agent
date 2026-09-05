@@ -321,6 +321,17 @@ def test_production_contract_baseline_v1_catalog_is_exact_and_replay_safe() -> N
     ).is_file()
 
 
+def test_production_java_build_binds_source_only_after_dependency_cache() -> None:
+    dockerfile = (ROOT / "apps/domain-service/Dockerfile.production-runtime").read_text(
+        encoding="utf-8"
+    )
+    assert dockerfile.count("ARG PRODUCTION_RUNTIME_SOURCE_SHA") == 1
+    assert dockerfile.index("dependency:go-offline") < dockerfile.index(
+        "ARG PRODUCTION_RUNTIME_SOURCE_SHA"
+    ) < dockerfile.index("COPY src ./src")
+    assert '-Dproduction-runtime.source-sha="${PRODUCTION_RUNTIME_SOURCE_SHA}"' in dockerfile
+
+
 def test_java_maven_settings_use_the_official_central_repository() -> None:
     settings = ET.parse(ROOT / "apps/domain-service" / ".mvn" / "settings.xml")
     namespace = {"m": "http://maven.apache.org/SETTINGS/1.2.0"}

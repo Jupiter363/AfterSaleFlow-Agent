@@ -1,6 +1,5 @@
 package com.example.dispute.workflow.runtime;
 
-import com.example.dispute.workflow.runtime.persistence.JdbcProductionActivationStores;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -60,12 +59,6 @@ public class ProductionActivationRuntimeConfiguration {
         url,
         required(environment, "app.production-runtime.measurement.graph-datasource.username"),
         required(environment, "app.production-runtime.measurement.graph-datasource.password"));
-  }
-
-  @Bean
-  JdbcProductionActivationStores productionActivationStores(
-      @Qualifier("dataSource") DataSource dataSource) {
-    return new JdbcProductionActivationStores(dataSource, Clock.systemUTC());
   }
 
   @Bean

@@ -142,3 +142,27 @@ node node_modules/vite/bin/vite.js build
   `tests/api/test_graph_contract_resources.py` 实际执行 5/5 通过，包括完整 codec 加载和缓存复用。
 
 该发现属于容器资源定位缺陷，不是模型生成问题；完整业务 E2E 仍待修复镜像启动后验证。
+
+## 第二轮启动门（2026-09-06 00:16—00:24）
+
+`379c598b71fa6cd0b420817305d97586633dcabc` 的正式镜像构建成功。新 run
+`p9-20260906-split02` 中 Python 已通过健康检查，UDS 和 mTLS 代理正常；API 也曾启动成功。
+但 CONTROL 在 Spring 装配阶段失败：`ProductionActivationRuntimeConfiguration` 与
+`ProductionControlConfiguration` 同时发布 `JdbcProductionActivationStores`，使 verifier
+按 `ProductionActivationReplayStore` 注入时得到两个候选。AGENT 因 activation 尚未注册而
+连带启动失败，故没有提交业务请求。
+
+- 修复：删除 runtime verifier 配置中的重复 factory，保留 CONTROL 的原共享 store。
+  不修改存储实现、签名校验或 workflow 行为；API 的独立角色装配保持不变。
+- 回归：`ProductionActivationStoreAssemblyIT` 加载真实生产配置。旧代码准确复现两个 bean；
+  修复后 1/1 通过，覆盖 CONTROL/API 三个存储接口引用同一实例，以及 AGENT 不注册该 store。
+  测试不启动外部 worker、不访问数据库，因此不替代 live 启动验收。
+- 执行：`mvnw.cmd -Pproduction-runtime -Dproduction-runtime.skip-unit-tests=true
+  -Dproduction-runtime.source-sha=379c598b71fa6cd0b420817305d97586633dcabc
+  -Dit.test=ProductionActivationStoreAssemblyIT verify`，BUILD SUCCESS。
+- 调整 Dockerfile 中源码 SHA 参数的位置：依赖缓存完成后才引入，打包仍使用同一精确 SHA。
+  `test_production_java_build_binds_source_only_after_dependency_cache` 1/1 通过；无版本升级。
+- 第二轮只读数据库检查：`fulfillment_dispute_case=0`、`case_command=0`。
+  两次失败启动的日志/镜像/网络证据已导出，再按各自 host lock 清理临时资源；未删除历史数据。
+
+截至此记录，完整浏览器业务流程仍未通过，尚未推送。

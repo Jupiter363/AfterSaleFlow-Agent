@@ -1,5 +1,4 @@
 FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:f89b256658018e9a591f64b396a1dd82978af20b9a52605c0185a77c95a10eb0 AS build
-ARG PRODUCTION_RUNTIME_SOURCE_SHA
 WORKDIR /workspace
 
 COPY .mvn ./.mvn
@@ -7,6 +6,7 @@ COPY mvnw pom.xml ./
 RUN chmod +x mvnw
 RUN ./mvnw -s .mvn/settings.xml -B -ntp -Pproduction-runtime dependency:go-offline
 
+ARG PRODUCTION_RUNTIME_SOURCE_SHA
 COPY src ./src
 RUN ./mvnw -s .mvn/settings.xml -B -ntp -Pproduction-runtime \
     -Dmaven.test.skip=true \
