@@ -21,6 +21,8 @@ RUN useradd --create-home --uid 10001 app \
 
 USER app
 
+ENV AGENT_CONTRACT_ROOT=/contracts/agent-platform/v1
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+from app.contracts.v1.resources import resolve_contract_root
 
 from app.api.graph_commands import (
     GraphCommandEndpointDependencies,
@@ -1305,7 +1308,7 @@ def create_graph_readiness_router(handle: GraphRuntimeHandle) -> APIRouter:
 
 @lru_cache(maxsize=1)
 def _contract_codec() -> ContractCodec:
-    root = Path(__file__).resolve().parents[4] / "contracts" / "agent-platform" / "v1"
+    root = resolve_contract_root(__file__, os.environ.get("AGENT_CONTRACT_ROOT"))
     return ContractCodec(root)
 
 

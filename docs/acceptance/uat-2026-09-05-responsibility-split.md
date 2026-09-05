@@ -123,3 +123,22 @@ node node_modules/vite/bin/vite.js build
 
 当前计划为：构建精确提交 → 新建隔离数据与 namespace → 启动并验证 → 内置浏览器新建案件。
 此节不是 E2E 通过声明，不允许据此推送发布。
+
+## 隔离装配实测（2026-09-05 深夜—09-06）
+
+- `135c0f6d697dd18710b6277659c9224d347bbb94` 的四个应用镜像已由正式构建工具生成并锁定；
+  Java 生产 profile 编译、打包成功。构建使用跳过测试参数，不计作测试套件通过。
+- Maven 发布依赖曾被传递仓库的未认证端点拖慢；将既有官方 Central mirror 的范围改为
+  `external:*`，不改变依赖版本。仓库配置聚焦测试 1/1 通过。
+- 新隔离 run `p9-20260905-split01` 使用新数据库、新 namespace 和现有 Temporal 1.29.7
+  镜像。宿主默认 Docker 地址池已耗尽，只为该 run 的缺失网络分配经过路由/重叠检查的
+  独立地址段；没有删除历史网络或更改 Docker 全局配置。
+- Domain/Graph 数据库、Graph migration/restore 验证、Temporal/namespace、模型代理、
+  Redis、MinIO、Elasticsearch 和前端已启动。Python 在业务请求前发生
+  `IndexError: 4`：`graph_lifecycle._contract_codec()` 把源码仓库的固定目录深度用到
+  `/app/app/api/graph_lifecycle.py` 容器路径。Java 服务因此未获准启动，未创建案件。
+- 最小修复：容器通过 `AGENT_CONTRACT_ROOT` 指向已有只读协议挂载；源码运行保留
+  仓库定位方式。显式无效路径、缺失 inventory 均拒绝，不回退到猜测目录或放松 schema。
+  `tests/api/test_graph_contract_resources.py` 实际执行 5/5 通过，包括完整 codec 加载和缓存复用。
+
+该发现属于容器资源定位缺陷，不是模型生成问题；完整业务 E2E 仍待修复镜像启动后验证。
