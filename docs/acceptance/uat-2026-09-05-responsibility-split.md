@@ -549,3 +549,43 @@ Python `outcome/state.py::_validate_request_binding` 在模型调用前抛出
 UI 把 admission 冲突显示为模型失败；确认无本方命令且对方提交完成后才重新进入。
 终审/结果的通用“继续履约”显示与唯一 NO_EXTERNAL_EFFECT 计划不一致，不能从 UI 标签推导
 实际外部执行；V2 模型建议仍需人工核实，没有绕过终审授权。
+
+### 2026-09-06：Review 引用能力与命令完成所有权
+
+源码 `12c01ff7231f03df1a09831b42c929f52deeeed0`、隔离 run `p9-2546417b6ab8`，
+表单新建 `CASE_P9_SYNTHETIC_1`（测试订单 CUP-03）：8 次接待、4 次证据、7 次庭审运行
+均 COMPLETED/COMMITTED；双方无备注阶段事实矩阵不变。用户与商家各上传一份明确虚构的
+UAT 文字记录，完成五焦点回答、隔离可见性验证、无补证、V1/评审/V2。
+
+本轮没有计为完整通过，也没有推送，终审发现两个独立问题：
+
+1. 只读解释官把材料正文中的 remedy plan ID 当作 statement 引用，但该 ID 不在请求的
+   available refs 并集中。静态输出 Schema 允许任意字符串，随后权限校验正确拒绝。
+   修复给真实模型适配器提供请求专属引用目录、枚举 Schema 与明确提示词；空目录只能输出
+   空引用。原始材料保留，持久化公共 contract 与最终 citation validator 不放宽。
+2. 人工仅批准冻结计划唯一 NO_EXTERNAL_EFFECT 后，页面已到 Outcome，但辅助运行
+   `target-review-run:a4e1d83d52423833bdfacc5d86c03722` 停在 RESULT_READY/UNCOMMITTED。
+   38,891 字节冻结输入已通过并生成结果，证明输入边界修复生效。Java finalizer 随后试图用
+   辅助 receipt hash 完成同一人工 command，而正式 Outcome owner 已写入另一 terminal hash，
+   严格 ledger 以 COMMAND_COMPLETION_CONFLICT 拒绝。只读核验 case_command 为 APPLIED，
+   result_sha256 精确等于已有 completion_hash。正确修复不覆盖/放松该 hash：明确 REVIEW
+   与精确 graph/version/checkpoint 合同只验证 admission、自身回执完成；人工 command 仍由
+   Outcome 或 non-execution disposition 唯一完成，且不依赖双方完成的先后顺序。
+
+新增真实 PostgreSQL 事务测试先在旧代码复现相同 durable-binding conflict，以及辅助先执行
+抢占 completion 的反向竞态。还覆盖 receipt room/pins/身份拒绝、精确重放、普通房间仍完成
+agent receipt 并拒绝冲突、caller rollback/read-only 边界。数据库使用既有 PostgreSQL16
+digest 的隔离测试容器；未修改正式 ledger、业务决策、迁移或任何历史行。
+
+失败现场冻结备份已实际恢复验证 `1|2|21`，对象归档 372 entries，5 个归档 SHA-256 全部复核。
+官方 teardown 仅移除本 run 的 23 containers / 14 networks / 8 volumes；旧主环境健康不变。
+后续使用相同组件版本、统一固定启动流程重建，重新走完整浏览器验收；不得只凭 Outcome
+页面显示成功认定通过，必须包含解释官及终审辅助结果的后台完成状态。
+
+本次定向回归实际结果：Python 48 PASS、Ruff PASS；Java 13 PASS / 0 failure/error/skip
+（其中真实 PostgreSQL 所有权测试 6 项），`git diff --check` PASS。执行命令：
+
+```powershell
+python -m pytest tests/agents/test_review_output.py tests/agents/test_review_copilot.py tests/graphs/outcome -q --disable-warnings
+./mvnw.cmd "-Dtest=JdbcProductionCommandCompletionOwnershipTest,ProductionMultiRoomFinalizationGatewayTest,ProductionReviewRoomFinalizationStrategyAuthorizationTest,ProductionMultiRoomOuterFinalizerContractTest" test
+```

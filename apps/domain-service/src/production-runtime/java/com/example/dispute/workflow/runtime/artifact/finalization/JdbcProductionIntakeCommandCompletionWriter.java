@@ -1,12 +1,15 @@
 package com.example.dispute.workflow.runtime.artifact.finalization;
 
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.runtime.finalization.ProductionExecutionLaneVerifier;
 import com.example.dispute.workflow.runtime.finalization.ProductionFinalizationReceipt;
 import com.example.dispute.workflow.runtime.finalization.ProductionCommandCompletionWriter;
 import com.example.dispute.workflow.runtime.finalization.ProductionIntakeOuterFinalizer.CommandCompletionWriter;
 import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger;
 import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandAdmissionSnapshot;
 import com.example.dispute.workflow.runtime.persistence.ProductionActivationLedger.CommandCompletion;
+import com.example.dispute.workflow.runtime.rooms.review.TargetReviewFinalizationAdapter;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Objects;
@@ -15,7 +18,9 @@ import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Completes exactly the pre-admitted command on the target Finalizer transaction.
+ * Completes an agent-owned admitted command on the target Finalizer transaction.
+ * Review advisory output validates the admission but never completes the human decision command;
+ * its formal Outcome or non-execution disposition owns that completion, in either ordering.
  *
  * <p>This adapter intentionally never uses the ledger overload that opens or commits its own
  * connection. That would allow a completion marker to outlive a rolled-back domain finalization.
@@ -44,6 +49,10 @@ public final class JdbcProductionIntakeCommandCompletionWriter
                     .orElseThrow(() -> new IllegalStateException(
                             "target finalization command admission is absent"));
             requireExactAdmission(admission, request, receipt);
+            if (request.command().roomType() == RoomType.REVIEW) {
+                requireAdvisoryReviewContract(request, receipt);
+                return;
+            }
             activationLedger.completeCommand(connection, new CommandCompletion(
                     admission.admissionId(),
                     receipt.activationId(),
@@ -53,6 +62,21 @@ public final class JdbcProductionIntakeCommandCompletionWriter
                     receipt.receiptHash()));
         } finally {
             DataSourceUtils.releaseConnection(connection, dataSource);
+        }
+    }
+
+    private static void requireAdvisoryReviewContract(
+            ExecuteAgentRunRequest request, ProductionFinalizationReceipt receipt) {
+        var command = request.command();
+        boolean exact = TargetReviewFinalizationAdapter.TARGET_GRAPH_KEY.equals(command.graphKey())
+                && ProductionExecutionLaneVerifier.GRAPH_VERSION.equals(command.graphVersion())
+                && ProductionExecutionLaneVerifier.CHECKPOINT_SCHEMA_VERSION.equals(command.checkpointSchemaVersion())
+                && command.graphKey().equals(receipt.graphKey())
+                && command.graphVersion().equals(receipt.graphVersion())
+                && command.checkpointSchemaVersion().equals(receipt.checkpointSchemaVersion());
+        if (!exact) {
+            throw new IllegalStateException(
+                    "advisory Review command completion requires the exact Review graph contract");
         }
     }
 
@@ -82,6 +106,7 @@ public final class JdbcProductionIntakeCommandCompletionWriter
             ExecuteAgentRunRequest request,
             ProductionFinalizationReceipt receipt) {
         boolean exact = admission.activationId().equals(receipt.activationId())
+                && request.command().roomType() == receipt.roomType()
                 && request.command().tenantSurrogate().equals(receipt.tenantSurrogate())
                 && request.command().caseId().equals(receipt.caseId())
                 && admission.tenantSurrogate().equals(receipt.tenantSurrogate())

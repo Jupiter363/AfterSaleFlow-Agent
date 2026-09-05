@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.llm import StructuredLlmClient
 from app.harness.prompt_composer import PromptRepository
+from app.agents.review_output import review_answer_type, review_citation_catalog
 from app.schemas import (
     CriticDraft,
     CriticType,
@@ -81,15 +82,20 @@ class ModelReviewAnswerer:
         self,
         request: ReviewCopilotRequest,
     ) -> ReviewCopilotAnswer:
+        output_type = review_answer_type(request)
         system_prompt, user_prompt = self._prompts.render(
             "review_copilot",
-            request.model_dump(mode="json"),
-            ReviewCopilotAnswer.model_json_schema(),
+            {**request.model_dump(mode="json"), "citation_catalog": review_citation_catalog(request)},
+            output_type.model_json_schema(),
         )
         generation = self._llm.generate(
             node_name="review_copilot",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            output_type=ReviewCopilotAnswer,
+            output_type=output_type,
         )
-        return ReviewCopilotAnswer.model_validate(generation.value)
+        # Normalize back to the unchanged persisted/public contract. The request-
+        # scoped model is only a generation constraint, never a new protocol.
+        return ReviewCopilotAnswer.model_validate(
+            output_type.model_validate(generation.value).model_dump(mode="json")
+        )
