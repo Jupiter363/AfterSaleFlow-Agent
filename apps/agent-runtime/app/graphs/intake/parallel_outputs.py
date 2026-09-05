@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, TypeAlias, cast
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias, cast
 
 from pydantic import (
     BaseModel,
@@ -151,8 +151,8 @@ class DialogueFrameValueV2(StrictFrameOutput):
     # The persisted phase remains Java authority for the visible action.  The
     # Provider owns only the one semantic distinction that the phase cannot
     # determine on its own: whether a WAITING_FOR_REMARK message contains a
-    # remark or explicitly declines one.  Request-bound Schema narrows this to
-    # No Provider decision is exposed in other phases; materialization supplies null.
+    # remark or explicitly declines one. No Provider decision is exposed in
+    # other phases; materialization supplies null.
     remark_disposition: DialogueRemarkDisposition | None
 
 
@@ -195,28 +195,62 @@ class IntakeDialogueRemarkGenerationV4(IntakeDialogueGenerationV4):
     dialogue: DialogueRemarkUpdateDraftV4
 
 
+class DialogueAcknowledgementDraftV7(DialoguePublicSegmentDraftV3):
+    segment_kind: Literal["ACKNOWLEDGEMENT"]
+
+
+class DialogueInvitationDraftV7(DialoguePublicSegmentDraftV3):
+    segment_kind: Literal["TRANSITION"]
+
+
+class DialogueRemarkDraftV7(DialoguePublicSegmentDraftV3):
+    segment_kind: Literal["REMARK_ACKNOWLEDGEMENT"]
+
+
+class IntakeDialogueAcknowledgementGenerationV7(StrictFrameOutput):
+    intake_dialogue_phase: ClassVar[Literal["NOT_READY"]] = "NOT_READY"
+    public_projection_items: tuple[DialogueAcknowledgementDraftV7, ...] = Field(
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
+    )
+
+
+class IntakeDialogueInvitationGenerationV7(StrictFrameOutput):
+    intake_dialogue_phase: ClassVar[Literal["READY_PENDING_REMARK_INVITE"]] = (
+        "READY_PENDING_REMARK_INVITE"
+    )
+    public_projection_items: tuple[DialogueInvitationDraftV7, ...] = Field(
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
+    )
+
+
+class IntakeDialogueRemarkGenerationV7(StrictFrameOutput):
+    intake_dialogue_phase: ClassVar[Literal["WAITING_FOR_REMARK"]] = "WAITING_FOR_REMARK"
+    public_projection_items: tuple[DialogueRemarkDraftV7, ...] = Field(
+        min_length=1, max_length=DIALOGUE_SEGMENT_MAX_ITEMS
+    )
+    dialogue: DialogueRemarkUpdateDraftV4
+
+
 def request_bound_dialogue_output_types(
     *,
     persisted_phase: str,
 ) -> tuple[type[BaseModel], type[DialoguePublicSegmentDraftV3]]:
     """Expose only the remark distinction that this exact turn may author."""
 
-    if persisted_phase not in {
-        "NOT_READY",
-        "READY_PENDING_REMARK_INVITE",
-        "WAITING_FOR_REMARK",
-    }:
+    types = {
+        "NOT_READY": (
+            IntakeDialogueAcknowledgementGenerationV7, DialogueAcknowledgementDraftV7
+        ),
+        "READY_PENDING_REMARK_INVITE": (
+            IntakeDialogueInvitationGenerationV7, DialogueInvitationDraftV7
+        ),
+        "WAITING_FOR_REMARK": (
+            IntakeDialogueRemarkGenerationV7, DialogueRemarkDraftV7
+        ),
+    }
+    if persisted_phase not in types:
         raise ValueError("request-bound Dialogue phase cannot accept a ROOM_MESSAGE")
-    if persisted_phase == "WAITING_FOR_REMARK":
-        frame_type: type[BaseModel] = IntakeDialogueRemarkGenerationV4
-    elif persisted_phase == "READY_PENDING_REMARK_INVITE":
-        frame_type = IntakeDialogueTransitionGenerationV6
-    else:
-        frame_type = IntakeDialogueGenerationV4
-    return (
-        frame_type,
-        DialoguePublicSegmentDraftV3,
-    )
+    return types[persisted_phase]
 
 
 class DossierCurrentFactDraftV3(StrictFrameOutput):
@@ -705,21 +739,15 @@ def materialize_request_bound_frame_output(
 
     payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else dict(value)
     if frame_type == "DIALOGUE_FRAME":
-        items = payload.get("public_projection_items")
+        draft_type, _ = request_bound_dialogue_output_types(persisted_phase=persisted_phase)
+        draft = draft_type.model_validate(payload)
+        items = draft.public_projection_items
         if persisted_phase == "WAITING_FOR_REMARK":
-            draft = IntakeDialogueRemarkGenerationV4.model_validate(payload)
             disposition: DialogueRemarkDisposition | None = (
                 draft.dialogue.remark_disposition
             )
-            items = draft.public_projection_items
-        elif persisted_phase == "READY_PENDING_REMARK_INVITE":
-            draft = IntakeDialogueTransitionGenerationV6.model_validate(payload)
-            disposition = None
-            items = draft.public_projection_items
         else:
-            draft = IntakeDialogueGenerationV4.model_validate(payload)
             disposition = None
-            items = draft.public_projection_items
         return IntakeDialogueFrameV3.model_validate(
             {
                 "public_projection_items": [

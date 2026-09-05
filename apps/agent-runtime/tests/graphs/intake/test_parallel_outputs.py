@@ -77,6 +77,46 @@ def test_frame_schema_rejects_projection_reordering_and_full_score_gap() -> None
         validate_parallel_frame_output("QUALITY_FRAME", reordered)
 
 
+@pytest.mark.parametrize(
+    ("phase", "segment_kind"),
+    [
+        ("NOT_READY", "ACKNOWLEDGEMENT"),
+        ("READY_PENDING_REMARK_INVITE", "TRANSITION"),
+        ("WAITING_FOR_REMARK", "REMARK_ACKNOWLEDGEMENT"),
+    ],
+)
+def test_dialogue_phase_schema_accepts_only_its_segment_and_preserves_legacy_reader(phase, segment_kind):
+    output_type, item_type = request_bound_dialogue_output_types(persisted_phase=phase)
+    assert output_type.intake_dialogue_phase == phase
+    schema = output_type.model_json_schema()
+    assert "intake_dialogue_phase" not in schema["properties"]
+    assert item_type.model_json_schema()["properties"]["segment_kind"]["const"] == segment_kind
+    draft = _dialogue_provider_frame()
+    draft["public_projection_items"][0]["segment_kind"] = segment_kind
+    if phase == "WAITING_FOR_REMARK":
+        draft["dialogue"] = {"remark_disposition": "NO_REMARK"}
+        for invalid in (None, "", "UNKNOWN"):
+            with pytest.raises(ValidationError):
+                output_type.model_validate({**draft, "dialogue": {"remark_disposition": invalid}})
+        with pytest.raises(ValidationError):
+            output_type.model_validate({"public_projection_items": draft["public_projection_items"]})
+    else:
+        for invalid in (None, "REMARK", "NO_REMARK"):
+            with pytest.raises(ValidationError):
+                output_type.model_validate({**draft, "dialogue": {"remark_disposition": invalid}})
+    assert output_type.model_validate(draft)
+    for foreign in {"ACKNOWLEDGEMENT", "TRANSITION", "REMARK_ACKNOWLEDGEMENT"} - {segment_kind}:
+        wrong = {"segment_kind": foreign, "candidate_text": "已收到本次陈述。"}
+        with pytest.raises(ValidationError):
+            item_type.model_validate(wrong)
+        with pytest.raises(ValidationError):
+            output_type.model_validate({**draft, "public_projection_items": [wrong]})
+        # Old sealed Frames remain readable regardless of the new draft narrowing.
+        assert validate_parallel_frame_output("DIALOGUE_FRAME", {
+            "public_projection_items": [wrong], "dialogue": {"remark_disposition": None},
+        })
+
+
 def test_provider_visible_schema_rejects_question_segments_and_dimension_score_overflow(
 ) -> None:
     dialogue_schema = IntakeDialogueFrameV3.model_json_schema()
@@ -146,7 +186,7 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         transition,
         persisted_phase="READY_PENDING_REMARK_INVITE",
         respondent_capacity=False,
-    ).model_dump(mode="json") == _dialogue_frame()
+    ).model_dump(mode="json") == {**transition, "dialogue": {"remark_disposition": None}}
     for disposition in (None, "REMARK", "NO_REMARK"):
         invalid_transition = _dialogue_transition_provider_frame()
         invalid_transition["dialogue"] = {"remark_disposition": disposition}
@@ -748,12 +788,16 @@ def _dialogue_provider_frame() -> dict[str, object]:
 
 
 def _dialogue_transition_provider_frame() -> dict[str, object]:
-    return _dialogue_provider_frame()
+    payload = _dialogue_provider_frame()
+    payload["public_projection_items"][0]["segment_kind"] = "TRANSITION"
+    return payload
 
 
 def _dialogue_remark_provider_frame(disposition: str) -> dict[str, object]:
+    payload = _dialogue_provider_frame()
+    payload["public_projection_items"][0]["segment_kind"] = "REMARK_ACKNOWLEDGEMENT"
     return {
-        **_dialogue_provider_frame(),
+        **payload,
         "dialogue": {"remark_disposition": disposition},
     }
 

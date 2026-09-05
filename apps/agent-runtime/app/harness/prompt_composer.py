@@ -40,6 +40,14 @@ INTAKE_PARALLEL_FRAME_PROMPT_BUNDLES: Mapping[str, frozenset[str]] = (
     )
 )
 
+INTAKE_DIALOGUE_PHASE_TEMPLATES: Mapping[str, str] = MappingProxyType(
+    {
+        "NOT_READY": "intake_turn_dialogue_frame.not_ready.md",
+        "READY_PENDING_REMARK_INVITE": "intake_turn_dialogue_frame.invitation.md",
+        "WAITING_FOR_REMARK": "intake_turn_dialogue_frame.remark.md",
+    }
+)
+
 
 class PromptResourceError(FileNotFoundError):
     """A versioned Prompt bundle is absent, unreadable, or bound to the wrong node."""
@@ -243,6 +251,7 @@ class PromptComposer:
         prompt_profile_id: str | None = None,
         allow_profile_fallback: bool = False,
         trusted_agent_context: dict[str, Any] | None = None,
+        intake_dialogue_phase: str | None = None,
     ) -> tuple[str, str]:
         """返回 (system_prompt, user_prompt)。
 
@@ -254,6 +263,7 @@ class PromptComposer:
             prompt_profile_id=prompt_profile_id,
             allow_profile_fallback=allow_profile_fallback,
             trusted_agent_context=trusted_agent_context,
+            intake_dialogue_phase=intake_dialogue_phase,
         )
         user_prompt = self.render_user_prompt(case_data, output_schema)
         return system_prompt, user_prompt
@@ -269,6 +279,7 @@ class PromptComposer:
         prompt_profile_id: str | None = None,
         allow_profile_fallback: bool = False,
         trusted_agent_context: dict[str, Any] | None = None,
+        intake_dialogue_phase: str | None = None,
     ) -> str:
         """拼接系统提示词。
 
@@ -276,6 +287,7 @@ class PromptComposer:
         案件材料则在 render_user_prompt 中放到 untrusted_case_data，避免权限语义混淆。
         """
 
+        phase_path = self._dialogue_phase_path(node_name, intake_dialogue_phase)
         # 列表推导式会按 COMMON_FRAGMENT_FILES 的固定顺序读取每个通用规则文件。
         fragments = [
             self._read_required(self._harness_prompt_dir / filename)
@@ -317,7 +329,22 @@ class PromptComposer:
         fragments.append(self._read_required(base_template_path))
         if selected_template_path != base_template_path:
             fragments.append(self._read_required(selected_template_path))
+        if phase_path is not None:
+            fragments.append(self._read_required(phase_path))
         return "\n\n".join(fragment.strip() for fragment in fragments if fragment.strip())
+
+    def _dialogue_phase_path(self, node_name: str, phase: str | None) -> Path | None:
+        """Select a server-owned variant, never a path/phase from message text."""
+        if node_name != "intake_turn_dialogue_frame":
+            if phase is not None:
+                raise PromptResourceError("Dialogue phase cannot authorize another node")
+            return None
+        if phase not in INTAKE_DIALOGUE_PHASE_TEMPLATES:
+            raise PromptResourceError("Dialogue prompt requires an explicit supported phase")
+        return (
+            self._agent_prompt_root / "dispute_intake_officer"
+            / INTAKE_DIALOGUE_PHASE_TEMPLATES[phase]
+        )
 
     # 所属模块：Agent Harness > Prompt 仓库 > 不可信数据与输出合同渲染。
     # 具体功能：`render_user_prompt` 把案件/上下文放进 `untrusted_case_data`，并把 Pydantic JSON Schema 放进独立 `required_output_schema` 标签。
@@ -382,6 +409,9 @@ class PromptComposer:
             self._read_required(self._harness_prompt_dir / filename)
         resolved: list[Path] = []
         for node_name in requested:
+            if node_name == "intake_turn_dialogue_frame":
+                for phase in INTAKE_DIALOGUE_PHASE_TEMPLATES:
+                    self._read_required(self._dialogue_phase_path(node_name, phase))
             for shared_ref in self.NODE_SHARED_TEMPLATE_FILES.get(node_name, ()):
                 shared_path = (
                     self._agent_prompt_root
@@ -419,6 +449,16 @@ class PromptComposer:
         if not common_authority or not frame_prompt:
             raise PromptResourceError(
                 f"parallel Frame prompt bundle is empty: {node_name}"
+            )
+        if node_name == "intake_turn_dialogue_frame":
+            # Seal every variant in the instruction-pack hash. Only the selected
+            # variant is rendered for the Provider; this bundle is audit-only.
+            frame_prompt += "\n" + json.dumps(
+                {
+                    phase: self._read_required(self._dialogue_phase_path(node_name, phase))
+                    for phase in INTAKE_DIALOGUE_PHASE_TEMPLATES
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             )
         return common_authority, frame_prompt
 

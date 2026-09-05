@@ -43,6 +43,7 @@ def test_parallel_intake_frame_prompts_share_authority_but_isolate_frame_rules(
     system_prompt = repository.render_system_prompt(
         node_name,
         prompt_profile_id=node_name,
+        intake_dialogue_phase="NOT_READY" if node_name == "intake_turn_dialogue_frame" else None,
     )
 
     shared_rule = "lane_model_context 是当前独立任务唯一、不可变的最小业务事实视图"
@@ -90,10 +91,12 @@ def test_parallel_intake_frame_prompt_profile_cannot_authorize_another_frame() -
 def test_intake_prompts_preserve_claim_scope_without_promising_frozen_writes() -> None:
     repository = PromptRepository()
     for node in ("intake_turn_case_detail", "intake_turn_dossier_frame", "intake_turn_dialogue_frame"):
-        prompt = repository.render_system_prompt(node)
+        prompt = repository.render_system_prompt(
+            node, intake_dialogue_phase="NOT_READY" if node == "intake_turn_dialogue_frame" else None,
+        )
         assert "本次不申请退款/赔偿" in prompt
         assert "不等于“放弃权利”" in prompt
-    dialogue = repository.render_system_prompt("intake_turn_dialogue_frame")
+    dialogue = repository.render_system_prompt("intake_turn_dialogue_frame", intake_dialogue_phase="NOT_READY")
     assert "没有修改冻结诉求的权限" in dialogue
     assert "只能确认收到本轮更正" in dialogue
     dossier = repository.render_system_prompt("intake_turn_dossier_frame")
@@ -159,22 +162,70 @@ def test_parallel_dialogue_phase_authority_and_dossier_prompt_boundary() -> None
     dialogue = repository.render_system_prompt(
         "intake_turn_dialogue_frame",
         prompt_profile_id="intake_turn_dialogue_frame",
+        intake_dialogue_phase="READY_PENDING_REMARK_INVITE",
     )
     dossier = repository.render_system_prompt(
         "intake_turn_dossier_frame",
         prompt_profile_id="intake_turn_dossier_frame",
     )
 
-    assert "上一持久阶段为 NOT_READY 时，根对象只输出 public_projection_items" in dialogue
-    assert (
-        "READY_PENDING_REMARK_INVITE 时也只输出 public_projection_items"
-    ) in dialogue
-    assert "固定 null 占位由服务端补齐" in dialogue
-    assert "不能提前生成备注判定" in dialogue
-    assert "dialogue.remark_disposition=REMARK 或 NO_REMARK" in dialogue
+    assert "根对象只输出 public_projection_items" in dialogue
+    assert "previous_question_slots" in dialogue
+    assert "不代替后续正式确认" in dialogue
+    for foreign in ("NOT_READY", "WAITING_FOR_REMARK", "remark_disposition", "NO_REMARK"):
+        assert foreign not in dialogue
+    assert "null" not in dialogue.split("你只负责 DIALOGUE_FRAME", 1)[1]
     assert "根对象只输出 public_projection_items，不得输出 dossier_delta" in dossier
     assert "必须先依次输出根字段 respondent_attitude" in dossier
     assert "不得输出嵌套 dossier_delta" in dossier
+
+
+@pytest.mark.parametrize("phase", ["NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"])
+def test_dialogue_phase_prompt_has_only_current_task(phase: str) -> None:
+    repository = PromptRepository()
+    prompt = repository.render_system_prompt("intake_turn_dialogue_frame", intake_dialogue_phase=phase)
+    assert phase in prompt
+    for foreign in {"NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"} - {phase}:
+        assert foreign not in prompt
+    assert ("remark_disposition" in prompt) == (phase == "WAITING_FOR_REMARK")
+    # Shared JSON rules still allow null when a different Schema permits it;
+    # the Dialogue task itself must never ask the model to supply a placeholder.
+    assert "null" not in prompt.split("你只负责 DIALOGUE_FRAME", 1)[1]
+    if phase == "WAITING_FOR_REMARK":
+        assert "authorized_question_slots" not in prompt
+        assert "以实质内容为准" in prompt
+
+
+@pytest.mark.parametrize("phase", [None, "", "HAS_REMARKS", "NO_EXTRA_REMARKS", "../remark", "UNKNOWN"])
+def test_dialogue_phase_prompt_rejects_missing_or_unsupported_authority(phase) -> None:
+    with pytest.raises(PromptResourceError, match="explicit supported phase"):
+        PromptRepository().render_system_prompt("intake_turn_dialogue_frame", intake_dialogue_phase=phase)
+
+
+def test_dialogue_phase_prompt_cannot_select_a_foreign_node() -> None:
+    with pytest.raises(PromptResourceError, match="another node"):
+        PromptRepository().render_system_prompt("intake_turn_dossier_frame", intake_dialogue_phase="WAITING_FOR_REMARK")
+
+
+def test_dialogue_phase_variants_are_required_and_bound_to_instruction_hash(tmp_path) -> None:
+    from shutil import copytree
+    from app.contracts.v1.codec import canonical_sha256
+
+    source = Path(__file__).resolve().parents[2] / "app"
+    app_root = tmp_path / "app"
+    copytree(source / "agents" / "prompts", app_root / "agents" / "prompts")
+    copytree(source / "harness" / "prompts", app_root / "harness" / "prompts")
+    repository = PromptRepository(app_root=app_root)
+    node = "intake_turn_dialogue_frame"
+    before = repository.parallel_frame_instruction_sources(node)
+    invitation = app_root / "agents/prompts/dispute_intake_officer/intake_turn_dialogue_frame.invitation.md"
+    invitation.write_text(invitation.read_text(encoding="utf-8") + "\n新增测试约束。", encoding="utf-8")
+    after = repository.parallel_frame_instruction_sources(node)
+    assert before[0] == after[0]
+    assert canonical_sha256(before[1]) != canonical_sha256(after[1])
+    invitation.unlink()
+    with pytest.raises(PromptResourceError):
+        repository.require_prompt_bundle(node, required_node_names=(node,))
 
 
 def test_parallel_dossier_prompt_keeps_server_classification_out_of_provider_wire() -> None:

@@ -686,12 +686,36 @@ class IntakeFrameModelInputV2(_SelfHashedParallelModel):
     def provider_payload(self) -> dict[str, Any]:
         """Return only this task's bounded model view, never sibling authority."""
 
+        lane = _without_provider_hashes(self.lane_model_context.model_dump(mode="json"))
+        if self.frame_type == "DIALOGUE_FRAME":
+            # Preserve the sealed full context/checkpoint reader. Only the new
+            # provider projection is phase-specific; prose cannot select a phase.
+            phase = self.common_model_context.previous_state.persisted_phase
+            projected = {
+                "contract_version": "intake.dialogue-phase-context.v1",
+                "source_capacity": lane["source_capacity"],
+                "persisted_phase": phase,
+                "current_user_message": lane["current_user_message"],
+            }
+            if phase == "NOT_READY":
+                projected["authorized_question_slots"] = lane["authorized_question_slots"]
+                projected["recent_dialogue_messages"] = lane["recent_dialogue_messages"]
+            elif phase == "READY_PENDING_REMARK_INVITE":
+                # These are previous questions being answered, not new tasks.
+                projected["previous_question_slots"] = lane["authorized_question_slots"]
+            elif phase == "WAITING_FOR_REMARK":
+                projected["recent_dialogue_messages"] = lane["recent_dialogue_messages"]
+            else:
+                raise ValueError("Dialogue provider phase cannot accept a ROOM_MESSAGE")
+            return {
+                "contract_version": "intake.frame-provider-input.v2",
+                "frame_type": self.frame_type,
+                "lane_model_context": projected,
+            }
         return {
             "contract_version": "intake.frame-provider-input.v1",
             "frame_type": self.frame_type,
-            "lane_model_context": _without_provider_hashes(
-                self.lane_model_context.model_dump(mode="json")
-            ),
+            "lane_model_context": lane,
         }
 
 

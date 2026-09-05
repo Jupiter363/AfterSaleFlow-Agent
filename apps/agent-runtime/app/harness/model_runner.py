@@ -690,6 +690,9 @@ def prepare_baseline_invocation(
         node_name=node_name,
         agent_context=agent_context,
         prompt_profile_id=prompt_profile_id,
+        # The request-bound output type is selected from the validated persisted
+        # phase. Class metadata is not a JSON field and cannot be model-authored.
+        intake_dialogue_phase=getattr(output_type, "intake_dialogue_phase", None),
     )
     enriched_case_data = {
         **case_data,
@@ -723,6 +726,7 @@ def prepare_baseline_prompt_authority(
     node_name: str,
     agent_context: AgentInvocationContext | None,
     prompt_profile_id: str | None = None,
+    intake_dialogue_phase: str | None = None,
 ) -> PreparedPromptAuthority:
     """Render the exact baseline SystemMessage authority before graph execution."""
 
@@ -744,6 +748,7 @@ def prepare_baseline_prompt_authority(
         node_name,
         prompt_profile_id=resolved_prompt_profile_id,
         trusted_agent_context=trusted_context or None,
+        intake_dialogue_phase=intake_dialogue_phase,
     )
     return PreparedPromptAuthority(
         system_prompt=system_prompt,

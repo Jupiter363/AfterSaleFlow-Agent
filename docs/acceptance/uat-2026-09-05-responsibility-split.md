@@ -347,3 +347,41 @@ REMARK/NO_REMARK，NOT_READY 不变；旧 V5 类型和持久化 Frame v3 读取�
 5 项最小回归通过：实际邀请阶段三图 stream、checkpoint 重放零新增 provider 调用，
 Provider 禁止提前写备注字段、WAITING 邻接及提示词装配。未放宽正式阶段或 schema 校验。
 仍未完成证据到结果页，未推送；截图留在该 run `evidence/e2e-dialogue-placeholder-failed.png`。
+
+### 2026-09-06：按持久阶段裁剪 Dialogue 的模型任务
+
+按用户要求保留既有 Java 状态机，只调整 Dialogue Provider 输入、提示词和生成 Schema。
+根因不只是固定 null 曾交给模型填写：同一个系统模板同时描述多个阶段，WAITING 的输入还携带
+预设 `ACK_REMARK` 动作和旧追问槽，暴露了当前任务不应使用的指令与占位结论。
+违反的不变量是“模型只能执行当前持久阶段授权的任务，不得选择阶段或代写程序确定的值”。
+
+- NOT_READY：当前消息、近期对话和已有问题背景；仅允许 ACKNOWLEDGEMENT。
+- READY_PENDING_REMARK_INVITE：当前消息和明确标为 previous_question_slots 的上一轮问题；
+  不提供近期对话/新追问任务，仅允许 TRANSITION，不生成 dialogue 字段。
+- WAITING_FOR_REMARK：当前消息和近期陈述；删除问题槽及预设动作，只在此阶段允许
+  REMARK_ACKNOWLEDGEMENT 与 REMARK/NO_REMARK 分类。模型并未获得修改正式诉求的权限。
+
+三个专用阶段模板由从已校验持久阶段选择的 V7 输出类型携带非 JSON 的 ClassVar 判别值，
+Harness 使用该值选取唯一模板；不从案件文本、模型回答或路径猜测阶段。缺失/未知阶段及
+向其他节点使用 Dialogue 阶段均拒绝。三个模板全部计入 instruction-pack 内容哈希，
+启动资源检查会验证它们存在；实际发给模型的仅为当前阶段模板。系统通用 JSON 安全规则保留。
+
+完整 sealed model context、状态枚举、旧 V4/V5/V6 草稿读取类型和稳定 Frame v3 保留，
+只有 Dialogue 的 Provider 视图使用显式 frame-provider-input.v2；Dossier/Quality 视图不变。
+非备注阶段仍由 materializer 补 null，不允许模型提前填写，备注阶段不得遗漏分类。
+
+36 项定向 pytest PASS（88 项未选择）：包括三阶段 Schema 正负例、专用提示词隔离、
+模板缺失/内容哈希、缺失阶段零 Provider 调用、真实 Harness + 假 Provider 的四种阶段/分类组合、
+三图 stream 和 checkpoint 重放零重复调用、原始上下文不变及相邻 Harness/角色装配。
+这些是本地确定性回归，不是真实模型或浏览器 E2E 通过；不保证模型此后所有语义输出都正确。
+本轮未重启或升级服务、未写运行数据库、未推送。部署及证据到结果页验收仍待完成。
+
+另补跑 3/3 PASS：`test_legacy_v1_reset_complete_checkpoint_replays_without_provider`、
+`test_complete_checkpoint_replays_only_missing_prefix_without_provider`、
+`test_dialogue_single_visible_item_seals_without_terminal_slot_echo`，合计 39 项。
+本轮最终命令（工作目录 `apps/agent-runtime`，没有启动 Docker/Postgres 测试容器）：
+
+```powershell
+python -m pytest tests/harness/test_prompt_composer.py tests/harness/test_model_runner.py tests/graphs/intake/test_parallel_outputs.py tests/graphs/intake/test_parallel_graph.py tests/graphs/intake/test_parallel_contracts.py -q -k 'dialogue_phase or parallel_dialogue or provider_visible_schema or ready_invitation_stream or ready_pending_respondent or provider_payloads or three_physical_graphs_stream or production_bundle_deterministically or parallel_intake_frame_prompt or preserve_claim_scope or rejects_rehashed_lane or rejects_lane_hash_drift_on_replay or action_binding_must_match or model_runner_composes_prompt_with_managed_context_window or test_async_stream_preserves_semantic_validator_and_generation_reset'
+python -m pytest tests/graphs/intake/test_parallel_graph.py -q -k 'legacy_v1_reset_complete_checkpoint_replays_without_provider or complete_checkpoint_replays_only_missing_prefix_without_provider or dialogue_single_visible_item_seals_without_terminal_slot_echo'
+```
