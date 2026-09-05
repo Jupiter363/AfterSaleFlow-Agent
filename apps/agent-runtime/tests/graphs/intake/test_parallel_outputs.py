@@ -10,6 +10,7 @@ from app.graphs.intake.parallel_outputs import (
     DialoguePublicSegmentDraftV3,
     DossierPublicFactDraftV3,
     IntakeDialogueFrameV3,
+    IntakeDialogueTransitionGenerationV5,
     IntakeDossierFrameV3,
     IntakeQualityFrameV2,
     QualityPublicProjectionDraftV2,
@@ -133,17 +134,11 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
     transition_schema = transition_type.model_json_schema()
     assert list(transition_schema["properties"]) == [
         "public_projection_items",
-        "dialogue",
     ]
     assert transition_schema["required"] == [
         "public_projection_items",
-        "dialogue",
     ]
-    null_authority = transition_schema["$defs"]["DialogueNullAuthorityV5"]
-    assert null_authority["properties"]["remark_disposition"] == {
-        "title": "Remark Disposition",
-        "type": "null",
-    }
+    assert '"type": "null"' not in json.dumps(transition_schema)
     transition = _dialogue_transition_provider_frame()
     assert transition_type.model_validate(transition)
     assert materialize_request_bound_frame_output(
@@ -152,10 +147,16 @@ def test_provider_visible_schema_rejects_question_segments_and_dimension_score_o
         persisted_phase="READY_PENDING_REMARK_INVITE",
         respondent_capacity=False,
     ).model_dump(mode="json") == _dialogue_frame()
-    invalid_transition = _dialogue_transition_provider_frame()
-    invalid_transition["dialogue"] = {"remark_disposition": "REMARK"}
-    with pytest.raises(ValidationError, match="none_required"):
-        transition_type.model_validate(invalid_transition)
+    for disposition in (None, "REMARK", "NO_REMARK"):
+        invalid_transition = _dialogue_transition_provider_frame()
+        invalid_transition["dialogue"] = {"remark_disposition": disposition}
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            transition_type.model_validate(invalid_transition)
+    # Retain the explicitly versioned old draft and stable persisted Frame readers.
+    assert IntakeDialogueTransitionGenerationV5.model_validate({
+        **transition, "dialogue": {"remark_disposition": None},
+    })
+    assert validate_parallel_frame_output("DIALOGUE_FRAME", _dialogue_frame()).dialogue.remark_disposition is None
 
     waiting_type, _ = request_bound_dialogue_output_types(
         persisted_phase="WAITING_FOR_REMARK"
@@ -747,10 +748,7 @@ def _dialogue_provider_frame() -> dict[str, object]:
 
 
 def _dialogue_transition_provider_frame() -> dict[str, object]:
-    return {
-        **_dialogue_provider_frame(),
-        "dialogue": {"remark_disposition": None},
-    }
+    return _dialogue_provider_frame()
 
 
 def _dialogue_remark_provider_frame(disposition: str) -> dict[str, object]:

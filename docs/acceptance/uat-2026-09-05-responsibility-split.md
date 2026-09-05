@@ -331,3 +331,19 @@ checkpoint 的读取/重放保持不变，没有修正或接受越界标识。9 
 
 同时修复镜像构建日志依赖 Windows 默认 GBK 的问题：显式 UTF-8 解码，不改变退出码检查、
 镜像版本或构建权威。第二候选仍须重新部署和完整浏览器验收，未推送。
+
+### 候选 24cd2921：新增事实门通过，备注邀请占位暴露
+
+run `p9-a753d0be623c`（同一套锁定基础镜像）浏览器重新从表单建案。首轮及含新增事实的
+用户补充轮均 COMPLETED，分别为 `target-intake-run:8321f891b29439fea4a47ab2737db4ed`、
+`target-intake-run:c179e96d962f38bc9acf46dca47a7d9e`，未重发消息，事实标识修复获得运行验证。
+下一“陈述完整”轮却在 READY_PENDING_REMARK_INVITE 阶段 ABORTED：两次 Dialogue 生成均因
+`dialogue.remark_disposition` 的 `none_required` 校验拒绝（response_chars=166）。
+这是独立的模型生成服务端固定占位问题，不是先前 fact-key 失败复发。
+
+第三修复：该阶段使用显式 Provider draft `IntakeDialogueTransitionGenerationV6`，只生成公开回复，
+固定 `remark_disposition=null` 由 materializer 补齐。WAITING_FOR_REMARK 仍要求模型给出
+REMARK/NO_REMARK，NOT_READY 不变；旧 V5 类型和持久化 Frame v3 读取不删除。
+5 项最小回归通过：实际邀请阶段三图 stream、checkpoint 重放零新增 provider 调用，
+Provider 禁止提前写备注字段、WAITING 邻接及提示词装配。未放宽正式阶段或 schema 校验。
+仍未完成证据到结果页，未推送；截图留在该 run `evidence/e2e-dialogue-placeholder-failed.png`。

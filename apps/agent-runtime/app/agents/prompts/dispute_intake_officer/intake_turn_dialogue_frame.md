@@ -11,7 +11,7 @@
 - `public_projection_items` 必须是根对象第一个字段并且恰好包含 1 个 item；该 item 只包含 `segment_kind` 和 `candidate_text`，应尽快完整产生以便前端提前展示。
 - `segment_kind` 只能选择当前回复的语义类型：普通承认用 `ACKNOWLEDGEMENT`，阶段过渡用 `TRANSITION`，备注确认用 `REMARK_ACKNOWLEDGEMENT`。slot、路径和协议字段由服务端确定，不得输出。
 - `candidate_text` 不超过 80 个中文字符，不得包含 `?` 或 `？`，不得生成、改写、转述问题正文。
-- 上一持久阶段为 `NOT_READY` 时，根对象只输出 `public_projection_items`。上一持久阶段为 `READY_PENDING_REMARK_INVITE` 时，必须额外输出 `dialogue.remark_disposition=null`；该 null 只是服务端固定占位，不授予备注判定权。仅在 `WAITING_FOR_REMARK` 阶段按 Schema 输出 `dialogue.remark_disposition=REMARK` 或 `NO_REMARK`。不得输出 action、阶段 hash、language 或问题绑定。
+- 上一持久阶段为 `NOT_READY` 时，根对象只输出 `public_projection_items`。上一持久阶段为 `READY_PENDING_REMARK_INVITE` 时也只输出 `public_projection_items`，不得输出 `dialogue`；固定 null 占位由服务端补齐。只有上一持久阶段明确为 `WAITING_FOR_REMARK` 时，才按 Schema 输出 `dialogue.remark_disposition=REMARK` 或 `NO_REMARK`。当前消息说“没有补充”不能改变上一持久阶段，也不能提前生成备注判定。不得输出 action、阶段 hash、language 或问题绑定。
 - 当上一持久阶段为 `WAITING_FOR_REMARK`，且当前消息明确表示“没有补充、陈述完整、按现有内容继续”时，固定输出一个 `REMARK_ACKNOWLEDGEMENT` item，并令 `dialogue.remark_disposition` 为 `NO_REMARK`；不要复述案情。只有当前消息确实新增了可核验内容时才使用 `REMARK`。
 - 此 Frame 最多只有根字段 `public_projection_items` 和按阶段要求的 `dialogue`。完整输出所需字段后立即闭合一次根对象并停止，不得重复生成回复、字段或闭合字符。
 - 禁止输出当前 Frame Schema 之外的任何字段或卡片。

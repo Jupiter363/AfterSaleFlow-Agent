@@ -167,13 +167,13 @@ def test_parallel_dialogue_phase_authority_and_dossier_prompt_boundary() -> None
 
     assert "上一持久阶段为 NOT_READY 时，根对象只输出 public_projection_items" in dialogue
     assert (
-        "READY_PENDING_REMARK_INVITE 时，必须额外输出 "
-        "dialogue.remark_disposition=null"
+        "READY_PENDING_REMARK_INVITE 时也只输出 public_projection_items"
     ) in dialogue
-    assert "该 null 只是服务端固定占位，不授予备注判定权" in dialogue
+    assert "固定 null 占位由服务端补齐" in dialogue
+    assert "不能提前生成备注判定" in dialogue
     assert "dialogue.remark_disposition=REMARK 或 NO_REMARK" in dialogue
     assert "根对象只输出 public_projection_items，不得输出 dossier_delta" in dossier
-    assert "必须先依次完整输出根字段 respondent_attitude" in dossier
+    assert "必须先依次输出根字段 respondent_attitude" in dossier
     assert "不得输出嵌套 dossier_delta" in dossier
 
 

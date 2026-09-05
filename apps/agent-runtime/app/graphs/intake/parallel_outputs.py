@@ -152,7 +152,7 @@ class DialogueFrameValueV2(StrictFrameOutput):
     # Provider owns only the one semantic distinction that the phase cannot
     # determine on its own: whether a WAITING_FOR_REMARK message contains a
     # remark or explicitly declines one.  Request-bound Schema narrows this to
-    # null for every other phase.
+    # No Provider decision is exposed in other phases; materialization supplies null.
     remark_disposition: DialogueRemarkDisposition | None
 
 
@@ -187,6 +187,10 @@ class IntakeDialogueTransitionGenerationV5(IntakeDialogueGenerationV4):
     dialogue: DialogueNullAuthorityV5
 
 
+class IntakeDialogueTransitionGenerationV6(IntakeDialogueGenerationV4):
+    """Invitation draft: the server, not the model, supplies the null authority."""
+
+
 class IntakeDialogueRemarkGenerationV4(IntakeDialogueGenerationV4):
     dialogue: DialogueRemarkUpdateDraftV4
 
@@ -206,7 +210,7 @@ def request_bound_dialogue_output_types(
     if persisted_phase == "WAITING_FOR_REMARK":
         frame_type: type[BaseModel] = IntakeDialogueRemarkGenerationV4
     elif persisted_phase == "READY_PENDING_REMARK_INVITE":
-        frame_type = IntakeDialogueTransitionGenerationV5
+        frame_type = IntakeDialogueTransitionGenerationV6
     else:
         frame_type = IntakeDialogueGenerationV4
     return (
@@ -709,8 +713,8 @@ def materialize_request_bound_frame_output(
             )
             items = draft.public_projection_items
         elif persisted_phase == "READY_PENDING_REMARK_INVITE":
-            draft = IntakeDialogueTransitionGenerationV5.model_validate(payload)
-            disposition = draft.dialogue.remark_disposition
+            draft = IntakeDialogueTransitionGenerationV6.model_validate(payload)
+            disposition = None
             items = draft.public_projection_items
         else:
             draft = IntakeDialogueGenerationV4.model_validate(payload)

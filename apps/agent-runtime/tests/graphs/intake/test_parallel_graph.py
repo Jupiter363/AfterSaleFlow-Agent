@@ -1808,11 +1808,11 @@ async def test_same_generation_authorized_checkpoint_resumes_once() -> None:
     assert sum(isinstance(event, FrameSealed) for event in sink.events) == 1
 
 
-def _requests_and_contexts() -> tuple[
+def _requests_and_contexts(model_context=None) -> tuple[
     tuple[ParallelFrameExecutionRequest, ...],
     dict[str, AgentInvocationContext],
 ]:
-    model_context = _model_context()
+    model_context = model_context or _model_context()
     context_envelope = _context_envelope(model_context)
     model_inputs = build_frame_model_inputs(
         context_envelope=context_envelope,
@@ -2234,6 +2234,31 @@ def _model_context() -> IntakeModelContextViewV1:
             },
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_ready_invitation_stream_omits_provider_null_and_replays_stable_frame():
+    payload = _model_context().model_dump(mode="json")
+    payload.pop("model_context_view_sha256")
+    payload["previous_state"]["persisted_phase"] = "READY_PENDING_REMARK_INVITE"
+    payload["current_action_binding"] = {
+        "action": "INVITE_OPTIONAL_REMARK",
+        "derived_from_phase": "READY_PENDING_REMARK_INVITE",
+        "phase_source_sha256": canonical_sha256(payload["previous_state"]),
+    }
+    requests, contexts = _requests_and_contexts(IntakeModelContextViewV1.seal(payload))
+    runner = _StreamingRunner(_outputs())
+    orchestrator = ParallelIntakeFrameOrchestrator(
+        compile_parallel_frame_graphs(checkpointer=InMemorySaver())
+    )
+    result = await orchestrator.execute(requests, agent_contexts=contexts,
+                                        model_runner=runner, event_sink=_CollectingSink())
+    assert result.all_succeeded
+    assert result.completed["DIALOGUE_FRAME"].result.dialogue.remark_disposition is None
+    replay = await orchestrator.execute(requests, agent_contexts=contexts,
+                                        model_runner=runner, event_sink=_CollectingSink())
+    assert replay.all_succeeded
+    assert len(runner.calls) == 3
 
 
 def test_ready_pending_respondent_selects_optional_no_delta_dossier_schema() -> None:
