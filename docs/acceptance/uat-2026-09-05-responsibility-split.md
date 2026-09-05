@@ -2,9 +2,11 @@
 
 ## 最新状态（2026-09-06）
 
-真实模型浏览器 UAT 已验证双方按状态备注、上传/庭审和终审解释官 mTLS；页面到达 OUTCOME。
-`d02028cf` 轮的最终辅助记录被错误的输入大小上限拒绝，已拆开完整冻结输入与紧凑输出的边界，
-定向回归 34/34 通过，等待重新完成浏览器和后台收敛验收；完整验收暂不通过，未推送。
+`12a31175` / `p9-72cad5499c8a` 已完成真实模型、内置浏览器全流程功能 UAT，且后台收敛通过：
+新表单 → 双方接待与无备注确认 → 双方上传举证 → 四焦点庭审与补证 → V1/评审/V2 →
+只读终审解释 → 人工无外部效果审批 → 双方结果。21 次 agent run 全部完成，21 条正式命令
+全部 APPLIED，案件 CLOSED；人工 command completion 与正式结果 hash 相等，辅助 receipt
+保持独立且 COMMITTED。满足本次功能验收后推送门禁，不等于全部测试套件或生产认证通过。
 以下保留各轮原始失败和修复记录，不能将早期结论理解为最新进度。
 
 ## 首轮结论（历史）
@@ -610,3 +612,68 @@ fixture version pins，只有复现业务异常之后的 old-red 才作为机制
 定向 Python 99 PASS / 15 deselected（fresh form、ordered room、并行三分支、状态提示词），
 Ruff 和 diff whitespace 检查通过。失败 UAT 已冻结恢复验证 `1|0|1`、对象 113 entries，
 5 份备份 hash 复核后执行 exact run teardown；旧主环境不变。继续等待完整新案 E2E，未推送。
+
+### 2026-09-06：最终真实模型浏览器 UAT 与后台收敛通过
+
+被测代码为 `12a31175e0ad1e136fdf610ce07932e0d71aa30b`，本段仅补充验收记录，不改变被测代码。
+隔离 run `p9-72cad5499c8a` 由固定 `tools/uat/production-runtime/start.py` 启动，构建目录
+`builds/uat-12a31175-231a33471e6d`；模型为 `qwen3.8-flash`，thinking=false。沿用
+Temporal 1.29.7 和 PostgreSQL 16 的固定镜像 digest，没有升级；旧主环境容器健康且未重启。
+首次同版本构建遇到 Maven Central TLS 下载失败，重试同源码同依赖版本成功，未关闭 TLS 校验。
+
+通过 Codex 内置浏览器在 `http://127.0.0.1:25180/disputes` 新建表单，订单引用
+`UAT-20260906-CUP-05`，案件 `CASE_P9_SYNTHETIC_1`。这是蓝色杯/白色实收的虚构软件验收，
+不是历史失败案件的重试；测试全程没有直接 API 写入、手工业务 DML 或重复提交最终决定。
+
+| 验收环节 | 实测结果 |
+| --- | --- |
+| 首轮表单及双方接待 | 8 次运行全部 COMPLETED/COMMITTED；首次表单未提前邀请备注 |
+| 按状态备注 | 双方均经历 READY_PENDING_REMARK_INVITE → WAITING_FOR_REMARK → NO_EXTRA_REMARKS；邀请和无备注阶段事实矩阵不变 |
+| 双方证据 | 各上传一份明确标注虚构 UAT 的 TXT，经声明、上传、解析、本批提交、完成举证；4 次运行全部提交 |
+| 庭审 | 根据实际生成的四个焦点逐项回答；商家提交前 DOM 不含用户独立回答，双方提交后共同公开；双方无其他补证 |
+| 冻结与草案 | 冻结卷宗后完成 V1、评审、V2，7 次庭审运行全部提交；用户只读查看草案 |
+| 终审解释官 | 针对证据局限、草案建议与 NO_EXTERNAL_EFFECT 区别提问，COMPLETED/LEGACY_COMMITTED；未复现非法引用 |
+| 人工终审及辅助运行 | 仅批准冻结计划唯一无外部效果动作，辅助 REVIEW 运行 COMPLETED/COMMITTED；没有 completion hash 冲突 |
+| 最终结果 | 案件 CLOSED/OUTCOME；用户和商家均看到同一最终 no-effect 事件，刷新未新增命令、运行或执行回执 |
+
+接待阶段当场记录的事实矩阵文本 MD5 仅用于相等性对照，不代替协议 hash：用户版本 2/3/4
+均为 `bbda4cbbc5b45f375a6fa3af4c2d0a8b`；商家版本 6/7/8 均为
+`f339a02d1e0e82434a7a53214df5f2d5`。最终版本 8 的双方状态均为 NO_EXTRA_REMARKS。
+
+两份材料：
+
+- 用户 `cup05-order-receipt.txt`：`EVIDENCE_d0914f196f824763848a48276be0d0ba`。
+- 商家 `cup05-warehouse.txt`：`EVIDENCE_2d133745787740138557e18efa4f7f21`。
+
+最终只读持久态证明：
+
+- Agent runs：20 个 COMPLETED/COMMITTED、1 个 COMPLETED/LEGACY_COMMITTED；未完成、
+  未提交及非空 error_code 均为 0。21 条 case_command 全部 APPLIED。
+- 解释官：`AGENT_RUN_abf975674ea748fb8e01823dbec712d6`。
+- 终审任务：`hearing-review-task-4bc33a9690c83464a1890ad9b2da1c5c`，APPROVED，唯一记录。
+- 辅助运行：`target-review-run:2ce31f78471c379ea3ea6ee728be180e`；REVIEW receipt 为 COMMITTED，
+  receipt hash `70a1b2efc288b1ef61e038a57c281161077c293bffa7143c134e88c1959e0f90`。
+- 人工命令：`review-decision:72b986640186c0955907ad4d4f62fcf98751aa18674fa3ff731d69f1c3d5d927`，
+  APPLIED；`case_command.result_sha256` 和唯一 `production_runtime_command_completion.completion_hash`
+  均为 `c41029648b5c1de05447e98c19930f0a0fdd5c56b1fd3f5689032fc253ac34ba`。
+  它不等于辅助 receipt hash，证明双方完成所有权独立且均成功。
+- 唯一 Outcome operation receipt：SUCCEEDED / JAVA_RECONCILIATION / SATISFIED；
+  external receipt `target-noop:ORCT_bcbb9c2a2168267866c96da37e9db375`。
+  用户、商家最终显示 `urn:target-outcome:no-effect:ACT_1d920b7578d53f63f84646eb0078cb78`。
+- 刷新前后计数均为：21 runs、21 commands、20 finalization receipts、22 command completions、
+  1 outcome receipt。未通过重发业务命令来做幂等测试；精确 replay 已由前述定向回归覆盖。
+
+本地浏览器截图位于 `C:/Users/Jupiter/.after-sale-flow/production-runtime-local/p9-72cad5499c8a/evidence/`：
+`user-remark-passed.png`、`merchant-remark-passed.png`、`hearing-answer-isolation.png`、
+`user-v2-readonly.png`、`review-copilot-passed.png`、`reviewer-outcome-passed.png`、
+`user-outcome-passed.png`、`merchant-outcome-passed.png`。截图与运行凭据保留在本地，
+不将包含环境身份的启动文件或密钥提交仓库。
+
+**结论边界：**本次通过的是单个完整新案的功能与后台收敛验收，不能推断模型永不抖动、所有
+业务类型或全部测试套件通过。先前记录的基线测试失败没有在本轮掩盖或删除。V2 对虚构背景的
+处理、证据表述以及通用“继续履约”展示仍有质量改进空间；人工已明确限制为测试结案、保留
+用户权利，正式计划 actions 只有 TARGET_NO_EXTERNAL_EFFECT，preconditions/notifications 为空。
+冻结 remedy_plan 的 PENDING_HUMAN_REVIEW 字段未改写，最终决定依据独立 review_task 和
+正式 command/Outcome receipts，不据其单独推断运行未完成。
+启动器原始 attestation 仍为 INFRASTRUCTURE_READY_ONLY / production_lane_runnable=false；
+本功能记录不篡改其 business_e2e_passed 字段，也不替代剩余生产装配、权限与隔离认证。
